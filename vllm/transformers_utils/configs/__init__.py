@@ -22,6 +22,7 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
+from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.midashenglm import MiDashengLMConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
@@ -57,6 +58,7 @@ __all__ = [
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
+    "OpenCUA_VLConfig",
     "NemotronConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",

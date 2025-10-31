@@ -324,7 +324,7 @@ def run_dp_sharded_mrope_vision_model(
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
     *,
-    rope_type: Literal["rope_3d", "rope_2d"],
+    rope_type: Literal["rope_3d", "rope_2d", "rope_1d"],
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -339,6 +339,7 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
+                   "rope_1d" for 1D rope (e.g., OpenCUA-VL)
     Returns:
         torch.Tensor: Output image embeddings
 

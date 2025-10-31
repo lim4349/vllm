@@ -354,6 +354,10 @@ _MULTIMODAL_MODELS = {
         "qwen2_5_vl",
         "Qwen2_5_VLForConditionalGeneration",
     ),
+    "OpenCUA_VLForConditionalGeneration": (
+        "opencua_vl",
+        "OpenCUA_VLForConditionalGeneration",
+    ),
     "Qwen2AudioForConditionalGeneration": (
         "qwen2_audio",
         "Qwen2AudioForConditionalGeneration",
