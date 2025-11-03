@@ -913,6 +913,12 @@ class OpenCUA_VisionTransformer(nn.Module):
 
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache for processor and tokenizer to avoid reloading
+        self._cached_processor: Qwen2_5_VLProcessor | None = None
+        self._cached_opencua_tokenizer = None
+    
     def get_hf_config(self):
         # Try to get OpenCUA_VLConfig first
         try:
@@ -931,6 +937,10 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+        # Return cached processor if available
+        if self._cached_processor is not None:
+            return self._cached_processor
+        
         # Load Qwen2.5-VL processor from base model (includes tokenizer, image_processor, video_processor)
         from transformers import AutoProcessor, AutoTokenizer
         
@@ -953,27 +963,50 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=use_fast,
         )
         
-        # Load OpenCUA tokenizer (Kimi-VL tokenizer) and replace processor's tokenizer
+        # Load OpenCUA tokenizer (Kimi-VL tokenizer) only once and cache it
         # OpenCUA uses Kimi-VL tokenizer which has the correct chat template
-        opencua_tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            use_fast=use_fast,
-        )
+        if self._cached_opencua_tokenizer is None:
+            self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
         
-        # Replace processor's tokenizer with OpenCUA tokenizer
-        processor.tokenizer = opencua_tokenizer
+        # Replace processor's tokenizer with cached OpenCUA tokenizer
+        processor.tokenizer = self._cached_opencua_tokenizer
+        
+        # Get image/video token IDs from OpenCUA config and set processor's image_token
+        # OpenCUA uses Kimi-VL tokenizer, so we need to use the correct token strings
+        hf_config = self.get_hf_config()
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        
+        # Convert token IDs to token strings that OpenCUA tokenizer recognizes
+        # This is necessary because Qwen2.5-VL processor's image_token (<|image_pad|>)
+        # cannot be encoded by OpenCUA tokenizer (Kimi-VL tokenizer)
+        try:
+            # Method 1: Use convert_ids_to_tokens (most reliable)
+            image_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
+            video_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
+            
+            # Update processor's image_token and video_token to match OpenCUA tokenizer
+            processor.image_token = image_token_str
+            processor.video_token = video_token_str
+        except Exception:
+            # If convert_ids_to_tokens fails, processor will use original tokens
+            # This should not happen, but we keep it as fallback
+            pass
         
         # Try to get chat template from OpenCUA tokenizer
         # Method 1: Check chat_template attribute
         chat_template = None
-        if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
-            chat_template = opencua_tokenizer.chat_template
+        if hasattr(self._cached_opencua_tokenizer, "chat_template") and self._cached_opencua_tokenizer.chat_template:
+            chat_template = self._cached_opencua_tokenizer.chat_template
         
         # Method 2: If not found, try get_chat_template() method
         if not chat_template:
             try:
-                chat_template = opencua_tokenizer.get_chat_template()
+                chat_template = self._cached_opencua_tokenizer.get_chat_template()
             except Exception:
                 pass
         
@@ -1015,6 +1048,9 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Set processor's chat_template (either from tokenizer or fallback)
         # This ensures vLLM can get the Kimi-VL chat template from processor
         processor.chat_template = chat_template
+        
+        # Cache the processor to avoid reloading
+        self._cached_processor = processor
         
         return processor
 
