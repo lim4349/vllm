@@ -73,7 +73,18 @@ class OpenCUA_VLConfig(Qwen2_5_VLConfig):
         if text_config is not None:
             if isinstance(text_config, dict):
                 # Use Qwen2 config for text
-                from vllm.transformers_utils.configs.qwen2 import Qwen2Config
+                try:
+                    from transformers.models.qwen2 import Qwen2Config
+                except ImportError:
+                    # Fallback: use Qwen2_5_VLConfig's text_config if available
+                    from transformers.configuration_utils import PretrainedConfig
+                    
+                    class Qwen2Config(PretrainedConfig):
+                        model_type = "qwen2"
+                        
+                        def __init__(self, **kwargs):
+                            super().__init__(**kwargs)
+                    
                 self.text_config = Qwen2Config(**text_config)
             else:
                 self.text_config = text_config
