@@ -1070,9 +1070,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             except Exception:
                 pass
         
-        # Set processor's chat_template if found
+        # Set chat_template to both processor and tokenizer
+        # vLLM checks processor.chat_template first, then tokenizer.get_chat_template()
         if chat_template:
             processor.chat_template = chat_template
+            # Also set tokenizer's chat_template if it has the attribute
+            if hasattr(self._cached_opencua_tokenizer, "chat_template"):
+                self._cached_opencua_tokenizer.chat_template = chat_template
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
