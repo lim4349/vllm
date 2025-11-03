@@ -934,24 +934,25 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Use Qwen2.5 base model for tokenizer (extract size from model name)
+        # Use Qwen2.5-VL base model for tokenizer and image processor
+        # (extract size from model name)
         if "7B" in model_path or "7b" in model_path:
-            qwen2_base = "Qwen/Qwen2.5-7B-Instruct"
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         elif "3B" in model_path or "3b" in model_path:
-            qwen2_base = "Qwen/Qwen2.5-3B-Instruct"
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
         else:
-            qwen2_base = "Qwen/Qwen2.5-7B-Instruct"
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
         # Load Qwen2Tokenizer from base model
         tokenizer = AutoTokenizer.from_pretrained(
-            qwen2_base,
+            qwen2_vl_base,
             trust_remote_code=True,
             use_fast=use_fast,
         )
         
         # Load image processor from Qwen2.5-VL base model
         image_processor = AutoImageProcessor.from_pretrained(
-            qwen2_base,
+            qwen2_vl_base,
             trust_remote_code=True,
         )
         
