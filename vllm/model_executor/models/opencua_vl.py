@@ -748,7 +748,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         total_tokens = (
             t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
         )
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_tokens)
+        # Actual sequence length after spatial merge unit expansion
+        actual_seq_len = total_tokens * self.spatial_merge_unit
+        # Generate rotary position embeddings for actual sequence length
+        rotary_pos_emb_1d = self.rotary_pos_emb_1d(actual_seq_len)
         
         cu_seqlens_1d = torch.tensor([total_tokens], dtype=torch.int32)
         return (
