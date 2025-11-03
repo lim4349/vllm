@@ -971,16 +971,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        # Use processor's tokenizer (not model's tokenizer) to match what Qwen2VLDummyInputsBuilder uses
+        # Qwen2VLDummyInputsBuilder uses hf_processor.image_token with processor's tokenizer
+        processor_tokenizer = hf_processor.tokenizer
+        processor_vocab = processor_tokenizer.get_vocab()
         # Get token IDs from OpenCUA_VLConfig for replacement
         hf_config = self.info.get_hf_config()
         
-        # Use processor's token strings to get token IDs from vocab (for matching in prompt)
-        # These should match what Qwen2VLDummyInputsBuilder uses
+        # Use processor's tokenizer to convert processor's token strings to IDs
+        # This matches what Qwen2VLDummyInputsBuilder does
         target_placeholder = {
-            "image": vocab[hf_processor.image_token],  # Token ID from processor's token string
-            "video": vocab[hf_processor.video_token],  # Token ID from processor's token string
+            "image": processor_vocab[hf_processor.image_token],
+            "video": processor_vocab[hf_processor.video_token],
         }
         replacement_placeholder = {
             "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses Kimi-VL tokenizer IDs)
