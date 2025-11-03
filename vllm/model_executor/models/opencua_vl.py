@@ -960,19 +960,24 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=use_fast,
         )
         
-        # Load Kimi-VL tokenizer from OpenCUA model
+        # Load tokenizer from OpenCUA model
+        # OpenCUA model uses the same tokenizer as Kimi-VL (per model documentation)
         if self._cached_opencua_tokenizer is None:
             self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
                 trust_remote_code=True,
                 use_fast=use_fast,
             )
+            logger.info(
+                f"Loaded tokenizer from OpenCUA model: {model_path}, "
+                f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
+            )
         
-        # Replace processor's tokenizer with Kimi-VL tokenizer
+        # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = self._cached_opencua_tokenizer
         
         # Get image/video token IDs from OpenCUA config and set processor's image_token
-        # OpenCUA uses Kimi-VL tokenizer, so we need to use the correct token strings
+        # OpenCUA tokenizer needs the correct token strings that it recognizes
         hf_config = self.get_hf_config()
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
@@ -1060,15 +1065,18 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Apply the monkey patch
         processor._check_special_mm_tokens = patched_check_special_mm_tokens
         
-        # Get Kimi-VL chat template from tokenizer
+        # Get chat template from OpenCUA tokenizer
+        # OpenCUA model uses the same chat template as Kimi-VL (per model documentation)
         chat_template = None
         if hasattr(self._cached_opencua_tokenizer, "chat_template") and self._cached_opencua_tokenizer.chat_template:
             chat_template = self._cached_opencua_tokenizer.chat_template
+            logger.info("Found chat_template attribute in OpenCUA tokenizer")
         elif hasattr(self._cached_opencua_tokenizer, "get_chat_template"):
             try:
                 chat_template = self._cached_opencua_tokenizer.get_chat_template()
-            except Exception:
-                pass
+                logger.info("Retrieved chat_template via get_chat_template() from OpenCUA tokenizer")
+            except Exception as e:
+                logger.warning(f"Failed to get chat_template from OpenCUA tokenizer: {e}")
         
         # Set chat_template to both processor and tokenizer
         # vLLM checks processor.chat_template first, then tokenizer.get_chat_template()
@@ -1077,6 +1085,9 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # Also set tokenizer's chat_template if it has the attribute
             if hasattr(self._cached_opencua_tokenizer, "chat_template"):
                 self._cached_opencua_tokenizer.chat_template = chat_template
+            logger.info("Set chat_template to processor and tokenizer")
+        else:
+            logger.warning("No chat_template found in OpenCUA tokenizer")
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
