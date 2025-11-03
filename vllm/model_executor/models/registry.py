@@ -354,7 +354,7 @@ _MULTIMODAL_MODELS = {
         "qwen2_5_vl",
         "Qwen2_5_VLForConditionalGeneration",
     ),
-    "OpenCUA_VLForConditionalGeneration": (
+    "OpenCUAForConditionalGeneration": (
         "opencua_vl",
         "OpenCUA_VLForConditionalGeneration",
     ),
