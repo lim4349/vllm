@@ -929,8 +929,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         # Load Qwen2 tokenizer from Qwen2.5 base model (Qwen2_5_VLProcessor needs Qwen2Tokenizer)
-        from transformers import AutoTokenizer
-        from transformers.models.qwen2_5_vl import Qwen2_5_VLImageProcessor
+        from transformers import AutoTokenizer, AutoImageProcessor
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
@@ -951,7 +950,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         )
         
         # Load image processor from Qwen2.5-VL base model
-        image_processor = Qwen2_5_VLImageProcessor.from_pretrained(
+        image_processor = AutoImageProcessor.from_pretrained(
             qwen2_base,
             trust_remote_code=True,
         )
