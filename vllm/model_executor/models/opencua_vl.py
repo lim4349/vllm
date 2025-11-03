@@ -941,39 +941,26 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_processor is not None:
             return self._cached_processor
         
-        # Load processor from OpenCUA model first, fallback to Qwen2.5-VL if not available
         from transformers import AutoProcessor, AutoTokenizer
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Try to load processor from OpenCUA model path first
-        try:
-            processor = AutoProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
-            logger.info(f"Loaded processor from OpenCUA model: {model_path}")
-        except Exception:
-            # Fallback to Qwen2.5-VL base model for processor (includes video_processor)
-            # (extract size from model name)
-            if "7B" in model_path or "7b" in model_path:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-            elif "3B" in model_path or "3b" in model_path:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
-            else:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-            
-            processor = AutoProcessor.from_pretrained(
-                qwen2_vl_base,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
-            logger.info(f"Loaded processor from Qwen2.5-VL base model: {qwen2_vl_base}")
+        # Load Qwen2.5-VL processor (includes image_processor, video_processor)
+        if "7B" in model_path or "7b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+        elif "3B" in model_path or "3b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
+        else:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
-        # Load OpenCUA tokenizer (Kimi-VL tokenizer) only once and cache it
-        # OpenCUA uses Kimi-VL tokenizer which has the correct chat template
+        processor = AutoProcessor.from_pretrained(
+            qwen2_vl_base,
+            trust_remote_code=True,
+            use_fast=use_fast,
+        )
+        
+        # Load Kimi-VL tokenizer from OpenCUA model
         if self._cached_opencua_tokenizer is None:
             self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
@@ -981,11 +968,8 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 use_fast=use_fast,
             )
         
-        # Replace processor's tokenizer with cached OpenCUA tokenizer
-        # Even if processor was loaded from OpenCUA model, ensure we use the correct tokenizer
-        if processor.tokenizer is not self._cached_opencua_tokenizer:
-            processor.tokenizer = self._cached_opencua_tokenizer
-            logger.info("Replaced processor's tokenizer with OpenCUA (Kimi-VL) tokenizer")
+        # Replace processor's tokenizer with Kimi-VL tokenizer
+        processor.tokenizer = self._cached_opencua_tokenizer
         
         # Get image/video token IDs from OpenCUA config and set processor's image_token
         # OpenCUA uses Kimi-VL tokenizer, so we need to use the correct token strings
@@ -1076,57 +1060,19 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Apply the monkey patch
         processor._check_special_mm_tokens = patched_check_special_mm_tokens
         
-        # Try to get chat template from OpenCUA tokenizer
-        # Method 1: Check chat_template attribute
+        # Get Kimi-VL chat template from tokenizer
         chat_template = None
         if hasattr(self._cached_opencua_tokenizer, "chat_template") and self._cached_opencua_tokenizer.chat_template:
             chat_template = self._cached_opencua_tokenizer.chat_template
-        
-        # Method 2: If not found, try get_chat_template() method
-        if not chat_template:
+        elif hasattr(self._cached_opencua_tokenizer, "get_chat_template"):
             try:
                 chat_template = self._cached_opencua_tokenizer.get_chat_template()
             except Exception:
                 pass
         
-        # Method 3: Fallback to Kimi-VL chat template if tokenizer doesn't have it
-        # This is the official Kimi-VL chat template format
-        if not chat_template:
-            chat_template = """{%- for message in messages -%}
-  {%- if loop.first and messages[0]['role'] != 'system' -%}
-    {{'<|im_system|>system<|im_middle|>You are a helpful assistant<|im_end|>'}}
-  {%- endif -%}
-  {%- if message['role'] == 'system' -%}
-    {{'<|im_system|>'}}
-  {%- endif -%}
-  {%- if message['role'] == 'user' -%}
-    {{'<|im_user|>'}}
-  {%- endif -%}
-  {%- if message['role'] == 'assistant' -%}
-    {{'<|im_assistant|>'}}
-  {%- endif -%}
-  {{- message['role'] -}}
-  {{'<|im_middle|>'}}
-  {%- if message['content'] is string -%}
-    {{- message['content'] + '<|im_end|>' -}}
-  {%- else -%}
-    {%- for content in message['content'] -%}
-      {%- if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}
-        {{'<|media_start|>image<|media_content|><|media_pad|><|media_end|>'}}
-      {%- else -%}
-        {{content['text']}}
-      {%- endif -%}
-    {%- endfor -%}
-    {{'<|im_end|>'}}
-  {%- endif -%}
-{%- endfor -%}
-{%- if add_generation_prompt -%}
-  {{'<|im_assistant|>assistant<|im_middle|>'}}
-{%- endif -%}"""
-        
-        # Set processor's chat_template (either from tokenizer or fallback)
-        # This ensures vLLM can get the Kimi-VL chat template from processor
-        processor.chat_template = chat_template
+        # Set processor's chat_template if found
+        if chat_template:
+            processor.chat_template = chat_template
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
