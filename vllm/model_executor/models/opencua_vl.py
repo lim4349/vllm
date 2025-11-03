@@ -932,7 +932,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         # Load Qwen2.5-VL processor from base model (includes tokenizer, image_processor, video_processor)
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor, AutoTokenizer
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
@@ -952,6 +952,23 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             trust_remote_code=True,
             use_fast=use_fast,
         )
+        
+        # Load Kimi-VL chat template from OpenCUA model's tokenizer
+        # OpenCUA uses Kimi-VL tokenizer which has the correct chat template
+        try:
+            opencua_tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
+            # Set Kimi-VL chat template from OpenCUA model's tokenizer
+            if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
+                processor.chat_template = opencua_tokenizer.chat_template
+        except Exception:
+            # Fallback: try to get chat template from processor's tokenizer
+            # This should work if the tokenizer already has the chat template
+            pass
+        
         return processor
 
 
