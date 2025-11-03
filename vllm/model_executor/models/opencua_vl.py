@@ -931,9 +931,12 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Use AutoProcessor to load the actual processor from model repository
         # This ensures we use the model's own processor/tokenizer with Kimi-VL chat template
         model_path = self.ctx.model_config.model
+        # Try to use fast tokenizer if available
+        use_fast = kwargs.pop("use_fast", True)
         processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
+            use_fast=use_fast,
             **kwargs,
         )
         return processor
