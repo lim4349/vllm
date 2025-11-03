@@ -1013,15 +1013,40 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             image_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
             video_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
             
-            # Directly update processor's tokens
-            # The processor will use processor.tokenizer (OpenCUA tokenizer) to tokenize these strings
-            processor.image_token = image_token_str
-            processor.video_token = video_token_str
-        except Exception:
+            # Verify that the token string can be encoded back to the same token ID
+            # This ensures that processor.image_token will encode to image_token_id
+            image_encoded = self._cached_opencua_tokenizer.encode(image_token_str, add_special_tokens=False)
+            video_encoded = self._cached_opencua_tokenizer.encode(video_token_str, add_special_tokens=False)
+            
+            if image_encoded and image_encoded[0] == image_token_id:
+                # Token string correctly encodes to the expected token ID
+                processor.image_token = image_token_str
+                logger.info(
+                    f"Set processor.image_token to '{image_token_str}' "
+                    f"(encodes to token ID {image_token_id})"
+                )
+            else:
+                logger.warning(
+                    f"Token string '{image_token_str}' encodes to {image_encoded}, "
+                    f"expected {image_token_id}. Using original processor token."
+                )
+            
+            if video_encoded and video_encoded[0] == video_token_id:
+                processor.video_token = video_token_str
+                logger.info(
+                    f"Set processor.video_token to '{video_token_str}' "
+                    f"(encodes to token ID {video_token_id})"
+                )
+            else:
+                logger.warning(
+                    f"Token string '{video_token_str}' encodes to {video_encoded}, "
+                    f"expected {video_token_id}. Using original processor token."
+                )
+        except Exception as e:
             # If conversion fails, log warning but continue
             # The processor will use original tokens from Qwen2.5-VL
             logger.warning(
-                f"Failed to convert OpenCUA token IDs to token strings. "
+                f"Failed to convert OpenCUA token IDs to token strings: {e}. "
                 f"image_token_id={image_token_id}, video_token_id={video_token_id}. "
                 f"Using default Qwen2.5-VL tokens."
             )
@@ -1143,9 +1168,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         
         # Use processor's tokenizer to convert processor's token strings to IDs
         # This matches what Qwen2VLDummyInputsBuilder does
-        # For TikTokenV3 (Kimi-VL tokenizer), encode the token string to get actual token IDs
+        # Qwen2VLDummyInputsBuilder.get_dummy_text() returns image_token * num_images
+        # and this is tokenized using processor.tokenizer (Kimi-VL tokenizer)
+        # So we need to encode processor.image_token to get the actual token IDs
+        # that will appear in the dummy text after tokenization
         try:
-            # Encode the token string to get actual token IDs (more reliable than convert_tokens_to_ids)
+            # Encode the token string to get actual token IDs
+            # This is what will actually appear in the tokenized dummy text
             image_token_ids = processor_tokenizer.encode(
                 hf_processor.image_token, add_special_tokens=False
             )
@@ -1153,13 +1182,46 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 hf_processor.video_token, add_special_tokens=False
             )
             
-            # Use the first token ID (image_token should encode to exactly one token)
+            # Verify that image_token encodes to exactly one token
+            # If it encodes to multiple tokens, we need to handle this differently
+            if len(image_token_ids) == 0:
+                # If encoding fails, fall back to config token ID
+                image_target_id = hf_config.image_token_id
+            elif len(image_token_ids) == 1:
+                # Normal case: image_token encodes to exactly one token
+                image_target_id = image_token_ids[0]
+            else:
+                # Unusual case: image_token encodes to multiple tokens
+                # Use the first token (shouldn't happen with proper tokenizers)
+                logger.warning(
+                    f"image_token '{hf_processor.image_token}' encodes to "
+                    f"{len(image_token_ids)} tokens: {image_token_ids}. "
+                    f"Using first token: {image_token_ids[0]}"
+                )
+                image_target_id = image_token_ids[0]
+            
+            if len(video_token_ids) == 0:
+                video_target_id = hf_config.video_token_id
+            elif len(video_token_ids) == 1:
+                video_target_id = video_token_ids[0]
+            else:
+                logger.warning(
+                    f"video_token '{hf_processor.video_token}' encodes to "
+                    f"{len(video_token_ids)} tokens: {video_token_ids}. "
+                    f"Using first token: {video_token_ids[0]}"
+                )
+                video_target_id = video_token_ids[0]
+            
             target_placeholder = {
-                "image": image_token_ids[0] if image_token_ids else hf_config.image_token_id,
-                "video": video_token_ids[0] if video_token_ids else hf_config.video_token_id,
+                "image": image_target_id,
+                "video": video_target_id,
             }
-        except Exception:
+        except Exception as e:
             # Fallback: use config token IDs directly
+            logger.warning(
+                f"Failed to encode processor tokens: {e}. "
+                f"Using config token IDs directly."
+            )
             target_placeholder = {
                 "image": hf_config.image_token_id,
                 "video": hf_config.video_token_id,
