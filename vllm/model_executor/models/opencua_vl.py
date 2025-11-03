@@ -928,13 +928,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # Load Qwen2 tokenizer from Qwen2.5 base model (Qwen2_5_VLProcessor needs Qwen2Tokenizer)
-        from transformers import AutoTokenizer, AutoImageProcessor
+        # Load Qwen2.5-VL processor from base model (includes tokenizer, image_processor, video_processor)
+        from transformers import AutoProcessor
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Use Qwen2.5-VL base model for tokenizer and image processor
+        # Use Qwen2.5-VL base model for processor
         # (extract size from model name)
         if "7B" in model_path or "7b" in model_path:
             qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -943,23 +943,11 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
-        # Load Qwen2Tokenizer from base model
-        tokenizer = AutoTokenizer.from_pretrained(
+        # Load full processor from Qwen2.5-VL base model (includes video_processor)
+        processor = AutoProcessor.from_pretrained(
             qwen2_vl_base,
             trust_remote_code=True,
             use_fast=use_fast,
-        )
-        
-        # Load image processor from Qwen2.5-VL base model
-        image_processor = AutoImageProcessor.from_pretrained(
-            qwen2_vl_base,
-            trust_remote_code=True,
-        )
-        
-        # Create Qwen2_5_VLProcessor with Qwen2Tokenizer
-        processor = Qwen2_5_VLProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
         )
         return processor
 
