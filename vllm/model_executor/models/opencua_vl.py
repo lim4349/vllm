@@ -1143,18 +1143,26 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         
         # Use processor's tokenizer to convert processor's token strings to IDs
         # This matches what Qwen2VLDummyInputsBuilder does
-        # For TikTokenV3 (OpenCUA tokenizer), use convert_tokens_to_ids instead of get_vocab()
+        # For TikTokenV3 (Kimi-VL tokenizer), encode the token string to get actual token IDs
         try:
-            processor_vocab = processor_tokenizer.get_vocab()
+            # Encode the token string to get actual token IDs (more reliable than convert_tokens_to_ids)
+            image_token_ids = processor_tokenizer.encode(
+                hf_processor.image_token, add_special_tokens=False
+            )
+            video_token_ids = processor_tokenizer.encode(
+                hf_processor.video_token, add_special_tokens=False
+            )
+            
+            # Use the first token ID (image_token should encode to exactly one token)
             target_placeholder = {
-                "image": processor_vocab[hf_processor.image_token],
-                "video": processor_vocab[hf_processor.video_token],
+                "image": image_token_ids[0] if image_token_ids else hf_config.image_token_id,
+                "video": video_token_ids[0] if video_token_ids else hf_config.video_token_id,
             }
-        except (AttributeError, KeyError):
-            # Fallback for tokenizers without get_vocab() (e.g., TikTokenV3)
+        except Exception:
+            # Fallback: use config token IDs directly
             target_placeholder = {
-                "image": processor_tokenizer.convert_tokens_to_ids(hf_processor.image_token),
-                "video": processor_tokenizer.convert_tokens_to_ids(hf_processor.video_token),
+                "image": hf_config.image_token_id,
+                "video": hf_config.video_token_id,
             }
         replacement_placeholder = {
             "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses TikTokenV3 tokenizer IDs)
