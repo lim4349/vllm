@@ -971,13 +971,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        # Get token IDs directly from OpenCUA_VLConfig
+        # Get token IDs from OpenCUA_VLConfig for replacement
         hf_config = self.info.get_hf_config()
         
-        # Use token IDs from config (OpenCUA uses Kimi-VL tokenizer IDs)
-        placeholder = {
-            "image": hf_config.image_token_id,
-            "video": hf_config.video_token_id,
+        # Use processor's token strings as target (for matching in prompt)
+        # but use config's token IDs for replacement (OpenCUA uses Kimi-VL tokenizer IDs)
+        target_placeholder = {
+            "image": hf_processor.image_token,  # String for matching
+            "video": hf_processor.video_token,  # String for matching
+        }
+        replacement_placeholder = {
+            "image": hf_config.image_token_id,  # Token ID for replacement
+            "video": hf_config.video_token_id,  # Token ID for replacement
         }
 
         merge_length = image_processor.merge_size**2
@@ -989,12 +994,12 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
             num_tokens = int(grid_thw.prod()) // merge_length
 
-            return [placeholder[modality]] * num_tokens
+            return [replacement_placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=target_placeholder[modality],  # Use string for matching
                 replacement=partial(get_replacement_opencua, modality=modality),
             )
             for modality in ("image", "video")
