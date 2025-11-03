@@ -953,21 +953,68 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=use_fast,
         )
         
-        # Load Kimi-VL chat template from OpenCUA model's tokenizer
+        # Load OpenCUA tokenizer (Kimi-VL tokenizer) and replace processor's tokenizer
         # OpenCUA uses Kimi-VL tokenizer which has the correct chat template
-        try:
-            opencua_tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
-            # Set Kimi-VL chat template from OpenCUA model's tokenizer
-            if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
-                processor.chat_template = opencua_tokenizer.chat_template
-        except Exception:
-            # Fallback: try to get chat template from processor's tokenizer
-            # This should work if the tokenizer already has the chat template
-            pass
+        opencua_tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            use_fast=use_fast,
+        )
+        
+        # Replace processor's tokenizer with OpenCUA tokenizer
+        processor.tokenizer = opencua_tokenizer
+        
+        # Try to get chat template from OpenCUA tokenizer
+        # Method 1: Check chat_template attribute
+        chat_template = None
+        if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
+            chat_template = opencua_tokenizer.chat_template
+        
+        # Method 2: If not found, try get_chat_template() method
+        if not chat_template:
+            try:
+                chat_template = opencua_tokenizer.get_chat_template()
+            except Exception:
+                pass
+        
+        # Method 3: Fallback to Kimi-VL chat template if tokenizer doesn't have it
+        # This is the official Kimi-VL chat template format
+        if not chat_template:
+            chat_template = """{%- for message in messages -%}
+  {%- if loop.first and messages[0]['role'] != 'system' -%}
+    {{'<|im_system|>system<|im_middle|>You are a helpful assistant<|im_end|>'}}
+  {%- endif -%}
+  {%- if message['role'] == 'system' -%}
+    {{'<|im_system|>'}}
+  {%- endif -%}
+  {%- if message['role'] == 'user' -%}
+    {{'<|im_user|>'}}
+  {%- endif -%}
+  {%- if message['role'] == 'assistant' -%}
+    {{'<|im_assistant|>'}}
+  {%- endif -%}
+  {{- message['role'] -}}
+  {{'<|im_middle|>'}}
+  {%- if message['content'] is string -%}
+    {{- message['content'] + '<|im_end|>' -}}
+  {%- else -%}
+    {%- for content in message['content'] -%}
+      {%- if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}
+        {{'<|media_start|>image<|media_content|><|media_pad|><|media_end|>'}}
+      {%- else -%}
+        {{content['text']}}
+      {%- endif -%}
+    {%- endfor -%}
+    {{'<|im_end|>'}}
+  {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+  {{'<|im_assistant|>assistant<|im_middle|>'}}
+{%- endif -%}"""
+        
+        # Set processor's chat_template (either from tokenizer or fallback)
+        # This ensures vLLM can get the Kimi-VL chat template from processor
+        processor.chat_template = chat_template
         
         return processor
 
@@ -994,16 +1041,24 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # Use processor's tokenizer (not model's tokenizer) to match what Qwen2VLDummyInputsBuilder uses
         # Qwen2VLDummyInputsBuilder uses hf_processor.image_token with processor's tokenizer
         processor_tokenizer = hf_processor.tokenizer
-        processor_vocab = processor_tokenizer.get_vocab()
         # Get token IDs from OpenCUA_VLConfig for replacement
         hf_config = self.info.get_hf_config()
         
         # Use processor's tokenizer to convert processor's token strings to IDs
         # This matches what Qwen2VLDummyInputsBuilder does
-        target_placeholder = {
-            "image": processor_vocab[hf_processor.image_token],
-            "video": processor_vocab[hf_processor.video_token],
-        }
+        # For TikTokenV3 (OpenCUA tokenizer), use convert_tokens_to_ids instead of get_vocab()
+        try:
+            processor_vocab = processor_tokenizer.get_vocab()
+            target_placeholder = {
+                "image": processor_vocab[hf_processor.image_token],
+                "video": processor_vocab[hf_processor.video_token],
+            }
+        except (AttributeError, KeyError):
+            # Fallback for tokenizers without get_vocab() (e.g., TikTokenV3)
+            target_placeholder = {
+                "image": processor_tokenizer.convert_tokens_to_ids(hf_processor.image_token),
+                "video": processor_tokenizer.convert_tokens_to_ids(hf_processor.video_token),
+            }
         replacement_placeholder = {
             "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses Kimi-VL tokenizer IDs)
             "video": hf_config.video_token_id,  # Token ID for replacement
