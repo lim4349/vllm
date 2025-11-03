@@ -68,23 +68,32 @@ echo ""
 echo "6. CUDA 의존성 설치 (xformers 제외)..."
 if [ -f "requirements/cuda.txt" ]; then
     # xformers 라인만 제거 (include 라인은 유지)
-    grep -v "^xformers" requirements/cuda.txt > /tmp/cuda_no_xformers.txt || true
+    # 현재 디렉토리 기준으로 파일 생성 (상대 경로 include가 작동하도록)
+    grep -v "^xformers" requirements/cuda.txt > requirements/cuda_no_xformers.txt || true
     # 빈 파일 체크
-    if [ -s /tmp/cuda_no_xformers.txt ]; then
+    if [ -s requirements/cuda_no_xformers.txt ]; then
         if command -v uv &> /dev/null; then
-            uv pip install -r /tmp/cuda_no_xformers.txt --torch-backend=auto || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd requirements
+            uv pip install -r cuda_no_xformers.txt --torch-backend=auto --prerelease=allow || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd ..
         else
-            pip install -r /tmp/cuda_no_xformers.txt || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd requirements
+            pip install -r cuda_no_xformers.txt || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd ..
         fi
+        rm -f requirements/cuda_no_xformers.txt
     else
-        echo "  경고: 필터링된 cuda.txt 파일이 비어있습니다. 원본 파일 사용"
+        echo "  경고: 필터링된 cuda.txt 파일이 비어있습니다. 원본 파일 사용 (xformers 포함)"
         if command -v uv &> /dev/null; then
-            uv pip install -r requirements/cuda.txt --torch-backend=auto || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd requirements
+            uv pip install -r cuda.txt --torch-backend=auto --prerelease=allow || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd ..
         else
-            pip install -r requirements/cuda.txt || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd requirements
+            pip install -r cuda.txt || echo "  경고: CUDA 의존성 설치 중 일부 실패"
+            cd ..
         fi
     fi
-    rm -f /tmp/cuda_no_xformers.txt
 else
     echo "  경고: requirements/cuda.txt 파일이 없습니다"
 fi
@@ -96,11 +105,11 @@ echo "   이 과정은 10-30분 정도 걸릴 수 있습니다..."
 if command -v uv &> /dev/null; then
     # xformers 스킵 설정
     export SKIP_XFORMERS_INSTALL=1
-    uv pip install -e . --torch-backend=auto --no-build-isolation || {
+    uv pip install -e . --torch-backend=auto --no-build-isolation --prerelease=allow || {
         echo ""
         echo "✗ 설치 실패!"
         echo "수동으로 다시 시도하세요:"
-        echo "  SKIP_XFORMERS_INSTALL=1 uv pip install -e . --torch-backend=auto --no-build-isolation"
+        echo "  SKIP_XFORMERS_INSTALL=1 uv pip install -e . --torch-backend=auto --no-build-isolation --prerelease=allow"
         exit 1
     }
 else
