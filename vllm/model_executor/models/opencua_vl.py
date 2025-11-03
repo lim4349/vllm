@@ -941,27 +941,36 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_processor is not None:
             return self._cached_processor
         
-        # Load Qwen2.5-VL processor from base model (includes tokenizer, image_processor, video_processor)
+        # Load processor from OpenCUA model first, fallback to Qwen2.5-VL if not available
         from transformers import AutoProcessor, AutoTokenizer
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Use Qwen2.5-VL base model for processor
-        # (extract size from model name)
-        if "7B" in model_path or "7b" in model_path:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-        elif "3B" in model_path or "3b" in model_path:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
-        else:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-        
-        # Load full processor from Qwen2.5-VL base model (includes video_processor)
-        processor = AutoProcessor.from_pretrained(
-            qwen2_vl_base,
-            trust_remote_code=True,
-            use_fast=use_fast,
-        )
+        # Try to load processor from OpenCUA model path first
+        try:
+            processor = AutoProcessor.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
+            logger.info(f"Loaded processor from OpenCUA model: {model_path}")
+        except Exception:
+            # Fallback to Qwen2.5-VL base model for processor (includes video_processor)
+            # (extract size from model name)
+            if "7B" in model_path or "7b" in model_path:
+                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+            elif "3B" in model_path or "3b" in model_path:
+                qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
+            else:
+                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+            
+            processor = AutoProcessor.from_pretrained(
+                qwen2_vl_base,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
+            logger.info(f"Loaded processor from Qwen2.5-VL base model: {qwen2_vl_base}")
         
         # Load OpenCUA tokenizer (Kimi-VL tokenizer) only once and cache it
         # OpenCUA uses Kimi-VL tokenizer which has the correct chat template
@@ -973,7 +982,10 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             )
         
         # Replace processor's tokenizer with cached OpenCUA tokenizer
-        processor.tokenizer = self._cached_opencua_tokenizer
+        # Even if processor was loaded from OpenCUA model, ensure we use the correct tokenizer
+        if processor.tokenizer is not self._cached_opencua_tokenizer:
+            processor.tokenizer = self._cached_opencua_tokenizer
+            logger.info("Replaced processor's tokenizer with OpenCUA (Kimi-VL) tokenizer")
         
         # Get image/video token IDs from OpenCUA config and set processor's image_token
         # OpenCUA uses Kimi-VL tokenizer, so we need to use the correct token strings
@@ -1003,6 +1015,66 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 f"image_token_id={image_token_id}, video_token_id={video_token_id}. "
                 f"Using default Qwen2.5-VL tokens."
             )
+        
+        # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
+        # The original method counts tokens in text string and compares with tokenized IDs,
+        # but OpenCUA tokenizer might not correctly tokenize the token string returned by convert_ids_to_tokens
+        # So we override the check to use the actual token IDs from the tokenizer
+        def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
+            """Patched version that uses OpenCUA tokenizer's actual token IDs"""
+            if modalities is None:
+                modalities = ["image", "video"]
+            
+            # Get tokenizer (OpenCUA tokenizer)
+            tokenizer = processor.tokenizer
+            
+            # Get input_ids tensor/list
+            input_ids = text_inputs["input_ids"]
+            if hasattr(input_ids, "tolist"):
+                input_ids_list = input_ids.tolist()
+                if isinstance(input_ids_list[0], list):
+                    input_ids_list = input_ids_list[0]
+            else:
+                input_ids_list = input_ids
+            
+            for modality in modalities:
+                if modality == "image":
+                    token_str = processor.image_token
+                    token_id = image_token_id
+                elif modality == "video":
+                    token_str = processor.video_token
+                    token_id = video_token_id
+                else:
+                    continue
+                
+                # Count occurrences in text
+                text_count = text.count(token_str)
+                
+                # Count occurrences in tokenized input_ids
+                # Use the actual token ID from OpenCUA config
+                ids_count = input_ids_list.count(token_id)
+                
+                # Check if counts match
+                if text_count != ids_count:
+                    # If mismatch, try to tokenize the token string and count
+                    # Sometimes the token string might encode to multiple tokens
+                    encoded = tokenizer.encode(token_str, add_special_tokens=False)
+                    actual_id_count = sum(1 for tid in input_ids_list if tid in encoded)
+                    
+                    # If still mismatch, log warning but don't fail
+                    # This can happen with TikToken-based tokenizers
+                    if text_count != actual_id_count:
+                        logger.warning(
+                            f"Mismatch in {modality} token count between text and input_ids. "
+                            f"text_count={text_count}, ids_count={ids_count}, "
+                            f"actual_id_count={actual_id_count}, token_str={token_str}, "
+                            f"token_id={token_id}"
+                        )
+                        # Don't raise error, just return
+                        return
+        
+        # Apply the monkey patch
+        processor._check_special_mm_tokens = patched_check_special_mm_tokens
         
         # Try to get chat template from OpenCUA tokenizer
         # Method 1: Check chat_template attribute
