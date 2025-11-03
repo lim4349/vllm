@@ -1067,9 +1067,25 @@ class OpenCUA_VLForConditionalGeneration(
         else:
             self.visual = None
 
+        # Use text_config for language model initialization
+        # (Qwen2ForCausalLM expects Qwen2Config, not OpenCUA_VLConfig)
+        text_config = getattr(config, "text_config", None)
+        if text_config is None:
+            # If text_config is not set, create one from the main config
+            # Extract text model parameters from the main config
+            from transformers.models.qwen2 import Qwen2Config
+            text_config_dict = {
+                k: v for k, v in config.to_dict().items()
+                if k not in ["vision_config", "model_type", "media_placeholder_token_id",
+                             "image_token_id", "video_token_id", "vision_start_token_id",
+                             "vision_end_token_id", "use_1d_rope"]
+            }
+            text_config = Qwen2Config(**text_config_dict)
+        
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
+            hf_config=text_config,
             architectures=["Qwen2ForCausalLM"],
         )
 
