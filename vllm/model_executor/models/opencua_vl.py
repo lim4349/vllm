@@ -971,12 +971,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
+        # Get token IDs directly from OpenCUA_VLConfig
+        hf_config = self.info.get_hf_config()
+        
+        # Use token IDs from config (OpenCUA uses Kimi-VL tokenizer IDs)
         placeholder = {
-            "image": vocab[hf_processor.image_token],
-            "video": vocab[hf_processor.video_token],
+            "image": hf_config.image_token_id,
+            "video": hf_config.video_token_id,
         }
 
         merge_length = image_processor.merge_size**2
