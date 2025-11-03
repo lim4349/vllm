@@ -354,6 +354,41 @@ def run_dp_sharded_mrope_vision_model(
 
     """
     tp_size = get_tensor_model_parallel_world_size()
+    
+    # Optimization: if tp_size == 1, skip data parallel processing
+    # to save memory and avoid unnecessary overhead
+    if tp_size == 1:
+        # Directly call vision model without sharding
+        if rope_type == "rope_2d":
+            image_embeds = vision_model(pixel_values, torch.tensor(grid_thw_list))
+            if isinstance(image_embeds, list):
+                image_embeds = torch.cat(image_embeds, dim=0)
+        else:
+            image_embeds = vision_model(pixel_values, grid_thw_list)
+        
+        # Split embeddings for each image
+        if rope_type == "rope_2d":
+            embed_dim_reduction_factor = (
+                vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
+            )
+        else:
+            embed_dim_reduction_factor = (
+                vision_model.spatial_merge_size * vision_model.spatial_merge_size
+            )
+        patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+        sizes = [
+            (patch_size // embed_dim_reduction_factor)
+            for patch_size in patches_per_image
+        ]
+        # For 2D rope, embeddings are 3D (seq_len, merge_size, hidden_dim)
+        # Need to reshape before splitting
+        if rope_type == "rope_2d" and image_embeds.ndim == 3:
+            hidden_dim = image_embeds.shape[2]
+            # Reshape to (total_patches, hidden_dim) for splitting
+            image_embeds = image_embeds.reshape(-1, hidden_dim)
+        return tuple(
+            image_embeds.split(sizes) if len(sizes) > 1 else (image_embeds,)
+        )
 
     # GPU_0 tp_rank_local = 0
     # GPU_1 tp_rank_local = 1
