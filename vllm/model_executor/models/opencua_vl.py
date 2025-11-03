@@ -83,10 +83,10 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsMultiModalPruning,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as OpenCUA_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
+    Qwen2VLDummyInputsBuilder,
     apply_rotary_pos_emb_vision,
 )
 from .utils import (
@@ -1007,49 +1007,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # This is necessary because Qwen2.5-VL processor's image_token (<|image_pad|>)
         # cannot be encoded by OpenCUA tokenizer (TikTokenV3)
         # We need to ensure the token string can be properly encoded back to the token ID
-        # Always update processor's image_token and video_token to match OpenCUA tokenizer
-        try:
-            # Use convert_ids_to_tokens to get token string from OpenCUA tokenizer
-            image_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
-            video_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
-            
-            # Verify that the token string can be encoded back to the same token ID
-            # This ensures that processor.image_token will encode to image_token_id
-            image_encoded = self._cached_opencua_tokenizer.encode(image_token_str, add_special_tokens=False)
-            video_encoded = self._cached_opencua_tokenizer.encode(video_token_str, add_special_tokens=False)
-            
-            if image_encoded and image_encoded[0] == image_token_id:
-                # Token string correctly encodes to the expected token ID
-                processor.image_token = image_token_str
-                logger.info(
-                    f"Set processor.image_token to '{image_token_str}' "
-                    f"(encodes to token ID {image_token_id})"
-                )
-            else:
-                logger.warning(
-                    f"Token string '{image_token_str}' encodes to {image_encoded}, "
-                    f"expected {image_token_id}. Using original processor token."
-                )
-            
-            if video_encoded and video_encoded[0] == video_token_id:
-                processor.video_token = video_token_str
-                logger.info(
-                    f"Set processor.video_token to '{video_token_str}' "
-                    f"(encodes to token ID {video_token_id})"
-                )
-            else:
-                logger.warning(
-                    f"Token string '{video_token_str}' encodes to {video_encoded}, "
-                    f"expected {video_token_id}. Using original processor token."
-                )
-        except Exception as e:
-            # If conversion fails, log warning but continue
-            # The processor will use original tokens from Qwen2.5-VL
-            logger.warning(
-                f"Failed to convert OpenCUA token IDs to token strings: {e}. "
-                f"image_token_id={image_token_id}, video_token_id={video_token_id}. "
-                f"Using default Qwen2.5-VL tokens."
-            )
+        # For OpenCUA, we need to use the actual token IDs from config directly
+        # because the token strings don't encode correctly to the token IDs
+        # Instead, we'll use the token IDs directly in _get_prompt_updates
+        # So we keep processor.image_token as Qwen2.5-VL's default for compatibility
+        # but use config token IDs for actual matching
+        logger.info(
+            f"OpenCUA image_token_id={image_token_id}, video_token_id={video_token_id}. "
+            f"Will use these IDs directly for prompt replacement."
+        )
         
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         # The original method counts tokens in text string and compares with tokenized IDs,
@@ -1160,72 +1126,22 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        # Use processor's tokenizer (not model's tokenizer) to match what Qwen2VLDummyInputsBuilder uses
-        # Qwen2VLDummyInputsBuilder uses hf_processor.image_token with processor's tokenizer
-        processor_tokenizer = hf_processor.tokenizer
         # Get token IDs from OpenCUA_VLConfig for replacement
         hf_config = self.info.get_hf_config()
         
-        # Use processor's tokenizer to convert processor's token strings to IDs
-        # This matches what Qwen2VLDummyInputsBuilder does
-        # Qwen2VLDummyInputsBuilder.get_dummy_text() returns image_token * num_images
-        # and this is tokenized using processor.tokenizer (Kimi-VL tokenizer)
-        # So we need to encode processor.image_token to get the actual token IDs
-        # that will appear in the dummy text after tokenization
-        try:
-            # Encode the token string to get actual token IDs
-            # This is what will actually appear in the tokenized dummy text
-            image_token_ids = processor_tokenizer.encode(
-                hf_processor.image_token, add_special_tokens=False
-            )
-            video_token_ids = processor_tokenizer.encode(
-                hf_processor.video_token, add_special_tokens=False
-            )
-            
-            # Verify that image_token encodes to exactly one token
-            # If it encodes to multiple tokens, we need to handle this differently
-            if len(image_token_ids) == 0:
-                # If encoding fails, fall back to config token ID
-                image_target_id = hf_config.image_token_id
-            elif len(image_token_ids) == 1:
-                # Normal case: image_token encodes to exactly one token
-                image_target_id = image_token_ids[0]
-            else:
-                # Unusual case: image_token encodes to multiple tokens
-                # Use the first token (shouldn't happen with proper tokenizers)
-                logger.warning(
-                    f"image_token '{hf_processor.image_token}' encodes to "
-                    f"{len(image_token_ids)} tokens: {image_token_ids}. "
-                    f"Using first token: {image_token_ids[0]}"
-                )
-                image_target_id = image_token_ids[0]
-            
-            if len(video_token_ids) == 0:
-                video_target_id = hf_config.video_token_id
-            elif len(video_token_ids) == 1:
-                video_target_id = video_token_ids[0]
-            else:
-                logger.warning(
-                    f"video_token '{hf_processor.video_token}' encodes to "
-                    f"{len(video_token_ids)} tokens: {video_token_ids}. "
-                    f"Using first token: {video_token_ids[0]}"
-                )
-                video_target_id = video_token_ids[0]
-            
-            target_placeholder = {
-                "image": image_target_id,
-                "video": video_target_id,
-            }
-        except Exception as e:
-            # Fallback: use config token IDs directly
-            logger.warning(
-                f"Failed to encode processor tokens: {e}. "
-                f"Using config token IDs directly."
-            )
-            target_placeholder = {
-                "image": hf_config.image_token_id,
-                "video": hf_config.video_token_id,
-            }
+        # For OpenCUA, we use the token IDs from config directly
+        # The dummy text generated by Qwen2VLDummyInputsBuilder uses processor.image_token
+        # which may not encode to the actual OpenCUA token IDs
+        # So we search for the actual OpenCUA token IDs in the tokenized prompt
+        # This ensures we match the correct tokens regardless of how processor.image_token encodes
+        target_placeholder = {
+            "image": hf_config.image_token_id,
+            "video": hf_config.video_token_id,
+        }
+        logger.info(
+            f"Using OpenCUA token IDs for target_placeholder: "
+            f"image={hf_config.image_token_id}, video={hf_config.video_token_id}"
+        )
         replacement_placeholder = {
             "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses TikTokenV3 tokenizer IDs)
             "video": hf_config.video_token_id,  # Token ID for replacement
@@ -1250,6 +1166,69 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             )
             for modality in ("image", "video")
         ]
+
+
+class OpenCUA_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    """Custom DummyInputsBuilder for OpenCUA-VL that uses OpenCUA token IDs."""
+    
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        """Generate dummy text using OpenCUA token IDs.
+        
+        For OpenCUA, we need to use the actual token IDs from config
+        instead of processor.image_token, because processor.image_token
+        doesn't encode to the correct OpenCUA token IDs with Kimi-VL tokenizer.
+        """
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        
+        # Get OpenCUA config token IDs
+        hf_config = self.info.get_hf_config()
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        
+        # For OpenCUA, we use decode([token_id]) to get the token string
+        # This ensures that when tokenized, we get the correct OpenCUA token IDs
+        tokenizer = self.info.get_tokenizer()
+        try:
+            # Decode token IDs to strings - this should work for special tokens
+            image_token_str = tokenizer.decode([image_token_id])
+            video_token_str = tokenizer.decode([video_token_id])
+            
+            # Verify that the decoded string encodes back to the correct token ID
+            image_encoded = tokenizer.encode(image_token_str, add_special_tokens=False)
+            video_encoded = tokenizer.encode(video_token_str, add_special_tokens=False)
+            
+            # If the decoded string doesn't encode correctly to a single token, try convert_ids_to_tokens
+            if not image_encoded or len(image_encoded) != 1 or image_encoded[0] != image_token_id:
+                # Fallback to convert_ids_to_tokens
+                try:
+                    image_token_str = tokenizer.convert_ids_to_tokens([image_token_id])[0]
+                    # Verify again
+                    image_encoded = tokenizer.encode(image_token_str, add_special_tokens=False)
+                    if not image_encoded or len(image_encoded) != 1 or image_encoded[0] != image_token_id:
+                        # Use processor token as last resort
+                        hf_processor = self.info.get_hf_processor()
+                        image_token_str = hf_processor.image_token
+                except Exception:
+                    hf_processor = self.info.get_hf_processor()
+                    image_token_str = hf_processor.image_token
+            
+            if not video_encoded or len(video_encoded) != 1 or video_encoded[0] != video_token_id:
+                try:
+                    video_token_str = tokenizer.convert_ids_to_tokens([video_token_id])[0]
+                    video_encoded = tokenizer.encode(video_token_str, add_special_tokens=False)
+                    if not video_encoded or len(video_encoded) != 1 or video_encoded[0] != video_token_id:
+                        hf_processor = self.info.get_hf_processor()
+                        video_token_str = hf_processor.video_token
+                except Exception:
+                    hf_processor = self.info.get_hf_processor()
+                    video_token_str = hf_processor.video_token
+            
+            return image_token_str * num_images + video_token_str * num_videos
+        except Exception:
+            # Fallback: use processor tokens (may not work correctly)
+            hf_processor = self.info.get_hf_processor()
+            return hf_processor.image_token * num_images + hf_processor.video_token * num_videos
 
 
 @MULTIMODAL_REGISTRY.register_processor(
