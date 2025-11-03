@@ -70,6 +70,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -910,7 +911,21 @@ class OpenCUA_VisionTransformer(nn.Module):
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen2_5_VLConfig)
+        # Try to get OpenCUA_VLConfig first
+        try:
+            return self.ctx.get_hf_config(OpenCUA_VLConfig)
+        except TypeError:
+            # If the loaded config is OpenCUAConfig from the model repository,
+            # convert it to OpenCUA_VLConfig
+            from transformers import AutoConfig
+            model_path = self.ctx.model_config.model
+            original_config = AutoConfig.from_pretrained(
+                model_path, trust_remote_code=True
+            )
+            config_dict = original_config.to_dict()
+            # Convert to OpenCUA_VLConfig
+            opencua_vl_config = OpenCUA_VLConfig.from_dict(config_dict)
+            return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         return self.ctx.get_hf_processor(
