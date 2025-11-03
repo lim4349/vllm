@@ -604,10 +604,14 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
+        skip_xformers = os.environ.get("SKIP_XFORMERS_INSTALL") == "1"
         for req in requirements:
             if "vllm-flash-attn" in req and cuda_major != "12":
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
+                continue
+            # Skip xformers if SKIP_XFORMERS_INSTALL is set
+            if skip_xformers and "xformers" in req:
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
