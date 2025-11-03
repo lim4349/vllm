@@ -928,39 +928,11 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # Load tokenizer from model repository (for Kimi-VL chat template)
-        # and create Qwen2_5_VLProcessor with tokenizer and image_processor
-        from transformers import AutoTokenizer, AutoImageProcessor
-        model_path = self.ctx.model_config.model
-        use_fast = kwargs.pop("use_fast", True)
-        
-        # Load tokenizer from model repository (Kimi-VL chat template)
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            use_fast=use_fast,
+        return self.ctx.get_hf_processor(
+            Qwen2_5_VLProcessor,
+            use_fast=kwargs.pop("use_fast", True),
+            **kwargs,
         )
-        
-        # Load image processor (try model repo first, fallback to Qwen2.5-VL)
-        try:
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-        except (ValueError, FileNotFoundError):
-            # Fallback to Qwen2.5-VL image processor
-            from transformers.models.qwen2_5_vl import Qwen2_5_VLImageProcessor
-            image_processor = Qwen2_5_VLImageProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-        
-        # Create Qwen2_5_VLProcessor with tokenizer and image_processor
-        processor = Qwen2_5_VLProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-        )
-        return processor
 
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
