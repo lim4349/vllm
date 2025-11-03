@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Adapted from Qwen2.5-VL and Kimi-VL implementations
+# Adapted from Qwen2.5-VL implementations
 # Copyright 2025 The vLLM team.
 # Copyright 2025 The Qwen Team.
 # Copyright 2025 The Moonshot AI Team.
@@ -960,31 +960,56 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=use_fast,
         )
         
-        # Load tokenizer from OpenCUA model
-        # OpenCUA model uses the same tokenizer as Kimi-VL (per model documentation)
+        # Load Kimi-VL tokenizer (OpenCUA uses the same tokenizer as Kimi-VL)
+        # Load from Kimi-VL model repository
         if self._cached_opencua_tokenizer is None:
-            self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
-            logger.info(
-                f"Loaded tokenizer from OpenCUA model: {model_path}, "
-                f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
-            )
+            # Try to load from Kimi-VL model first
+            # Extract model size from OpenCUA model path to match Kimi-VL size
+            if "7B" in model_path or "7b" in model_path:
+                kimi_vl_model = "moonshot-ai/kimi-vl-7b"
+            elif "3B" in model_path or "3b" in model_path:
+                kimi_vl_model = "moonshot-ai/kimi-vl-3b"
+            else:
+                kimi_vl_model = "moonshot-ai/kimi-vl-7b"
+            
+            try:
+                self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
+                    kimi_vl_model,
+                    trust_remote_code=True,
+                    use_fast=use_fast,
+                )
+                logger.info(
+                    f"Loaded Kimi-VL tokenizer from: {kimi_vl_model}, "
+                    f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
+                )
+            except Exception as e:
+                # Fallback to OpenCUA model if Kimi-VL model is not available
+                logger.warning(
+                    f"Failed to load Kimi-VL tokenizer from {kimi_vl_model}: {e}. "
+                    f"Falling back to OpenCUA model tokenizer."
+                )
+                self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    use_fast=use_fast,
+                )
+                logger.info(
+                    f"Loaded tokenizer from OpenCUA model: {model_path}, "
+                    f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
+                )
         
-        # Replace processor's tokenizer with OpenCUA tokenizer
+        # Replace processor's tokenizer with Kimi-VL tokenizer
         processor.tokenizer = self._cached_opencua_tokenizer
         
         # Get image/video token IDs from OpenCUA config and set processor's image_token
-        # OpenCUA tokenizer needs the correct token strings that it recognizes
+        # OpenCUA tokenizer (TikTokenV3) needs the correct token strings that it recognizes
         hf_config = self.get_hf_config()
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         
         # Convert token IDs to token strings that OpenCUA tokenizer recognizes
         # This is necessary because Qwen2.5-VL processor's image_token (<|image_pad|>)
-        # cannot be encoded by OpenCUA tokenizer (Kimi-VL tokenizer)
+        # cannot be encoded by OpenCUA tokenizer (TikTokenV3)
         # We need to ensure the token string can be properly encoded back to the token ID
         # Always update processor's image_token and video_token to match OpenCUA tokenizer
         try:
@@ -1065,18 +1090,18 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Apply the monkey patch
         processor._check_special_mm_tokens = patched_check_special_mm_tokens
         
-        # Get chat template from OpenCUA tokenizer
-        # OpenCUA model uses the same chat template as Kimi-VL (per model documentation)
+        # Get Kimi-VL chat template from Kimi-VL tokenizer
+        # OpenCUA uses the same chat template as Kimi-VL
         chat_template = None
         if hasattr(self._cached_opencua_tokenizer, "chat_template") and self._cached_opencua_tokenizer.chat_template:
             chat_template = self._cached_opencua_tokenizer.chat_template
-            logger.info("Found chat_template attribute in OpenCUA tokenizer")
+            logger.info("Found chat_template attribute in Kimi-VL tokenizer")
         elif hasattr(self._cached_opencua_tokenizer, "get_chat_template"):
             try:
                 chat_template = self._cached_opencua_tokenizer.get_chat_template()
-                logger.info("Retrieved chat_template via get_chat_template() from OpenCUA tokenizer")
+                logger.info("Retrieved chat_template via get_chat_template() from Kimi-VL tokenizer")
             except Exception as e:
-                logger.warning(f"Failed to get chat_template from OpenCUA tokenizer: {e}")
+                logger.warning(f"Failed to get chat_template from Kimi-VL tokenizer: {e}")
         
         # Set chat_template to both processor and tokenizer
         # vLLM checks processor.chat_template first, then tokenizer.get_chat_template()
@@ -1085,9 +1110,9 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # Also set tokenizer's chat_template if it has the attribute
             if hasattr(self._cached_opencua_tokenizer, "chat_template"):
                 self._cached_opencua_tokenizer.chat_template = chat_template
-            logger.info("Set chat_template to processor and tokenizer")
+            logger.info("Set Kimi-VL chat_template to processor and tokenizer")
         else:
-            logger.warning("No chat_template found in OpenCUA tokenizer")
+            logger.warning("No chat_template found in Kimi-VL tokenizer")
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
@@ -1136,7 +1161,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 "video": processor_tokenizer.convert_tokens_to_ids(hf_processor.video_token),
             }
         replacement_placeholder = {
-            "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses Kimi-VL tokenizer IDs)
+            "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses TikTokenV3 tokenizer IDs)
             "video": hf_config.video_token_id,  # Token ID for replacement
         }
 
