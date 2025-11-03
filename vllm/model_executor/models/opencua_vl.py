@@ -1138,10 +1138,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "image": vocab[hf_processor.image_token],
             "video": vocab[hf_processor.video_token],
         }
-        replacement_placeholder = {
-            "image": hf_config.image_token_id,  # Token ID for replacement (OpenCUA uses TikTokenV3 tokenizer IDs)
-            "video": hf_config.video_token_id,  # Token ID for replacement
-        }
 
         merge_length = image_processor.merge_size**2
 
