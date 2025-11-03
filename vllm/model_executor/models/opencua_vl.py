@@ -965,12 +965,8 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_opencua_tokenizer is None:
             # Try to load from Kimi-VL model first
             # Extract model size from OpenCUA model path to match Kimi-VL size
-            if "7B" in model_path or "7b" in model_path:
-                kimi_vl_model = "moonshot-ai/kimi-vl-7b"
-            elif "3B" in model_path or "3b" in model_path:
-                kimi_vl_model = "moonshot-ai/kimi-vl-3b"
-            else:
-                kimi_vl_model = "moonshot-ai/kimi-vl-7b"
+            
+            kimi_vl_model = "moonshotai/Kimi-VL-A3B-Instruct"
             
             try:
                 self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
