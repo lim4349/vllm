@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
+from transformers import BatchFeature, AutoProcessor
 # Import Qwen2.5-VL components dynamically to avoid import issues
 try:
     from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
@@ -928,11 +928,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        return self.ctx.get_hf_processor(
-            Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
+        # Use AutoProcessor to load the actual processor from model repository
+        # This ensures we use the model's own processor/tokenizer with Kimi-VL chat template
+        model_path = self.ctx.model_config.model
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
             **kwargs,
         )
+        return processor
 
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
