@@ -984,16 +984,61 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Convert token IDs to token strings that OpenCUA tokenizer recognizes
         # This is necessary because Qwen2.5-VL processor's image_token (<|image_pad|>)
         # cannot be encoded by OpenCUA tokenizer (Kimi-VL tokenizer)
+        # We need to ensure the token string can be properly encoded back to the token ID
         try:
-            # Method 1: Use convert_ids_to_tokens (most reliable)
+            # Method 1: Use convert_ids_to_tokens to get token string
             image_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
             video_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
             
-            # Update processor's image_token and video_token to match OpenCUA tokenizer
-            processor.image_token = image_token_str
-            processor.video_token = video_token_str
+            # Verify that encoding the token string gives back the same token ID
+            # This ensures Qwen2_5_VLProcessor._check_special_mm_tokens works correctly
+            encoded_image_id = self._cached_opencua_tokenizer.convert_tokens_to_ids(image_token_str)
+            encoded_video_id = self._cached_opencua_tokenizer.convert_tokens_to_ids(video_token_str)
+            
+            # Also verify by actually tokenizing the token string
+            # This ensures Qwen2_5_VLProcessor can find the token in tokenized text
+            # We need to ensure that when processor.tokenizer.encode(text_with_image_token) is called,
+            # it produces the expected image_token_id
+            test_text_image = f"test {image_token_str} test"
+            test_text_video = f"test {video_token_str} test"
+            
+            # Use processor.tokenizer (which is OpenCUA tokenizer) to encode
+            # This matches what Qwen2_5_VLProcessor will actually use
+            encoded_text_image = processor.tokenizer.encode(test_text_image, add_special_tokens=False)
+            encoded_text_video = processor.tokenizer.encode(test_text_video, add_special_tokens=False)
+            
+            # Check if the token ID appears in the encoded text
+            image_found = image_token_id in encoded_text_image
+            video_found = video_token_id in encoded_text_video
+            
+            # Also check: when we encode just the token string, does it produce exactly one token with the correct ID?
+            # This is critical for Qwen2_5_VLProcessor._check_special_mm_tokens
+            encoded_single_image = processor.tokenizer.encode(image_token_str, add_special_tokens=False)
+            encoded_single_video = processor.tokenizer.encode(video_token_str, add_special_tokens=False)
+            
+            # The token string should encode to exactly one token with the correct ID
+            image_single_match = (
+                len(encoded_single_image) == 1 and 
+                encoded_single_image[0] == image_token_id
+            )
+            video_single_match = (
+                len(encoded_single_video) == 1 and 
+                encoded_single_video[0] == video_token_id
+            )
+            
+            # Only update if all validations pass
+            if (encoded_image_id == image_token_id and 
+                encoded_video_id == video_token_id and
+                image_found and video_found and
+                image_single_match and video_single_match):
+                processor.image_token = image_token_str
+                processor.video_token = video_token_str
+            else:
+                # If validation fails, keep original tokens
+                # This should not happen, but we keep it as fallback
+                pass
         except Exception:
-            # If convert_ids_to_tokens fails, processor will use original tokens
+            # If conversion fails, processor will use original tokens
             # This should not happen, but we keep it as fallback
             pass
         
