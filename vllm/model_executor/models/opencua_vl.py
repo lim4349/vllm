@@ -943,16 +943,40 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         
         from transformers import AutoTokenizer
         
-        # Use OpenCUA's original processor (has min_pixels attribute)
+        # OpenCUA model may not have processor, so load Qwen2.5-VL processor explicitly
+        # and use OpenCUA model path for image processor config
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        processor = AutoProcessor.from_pretrained(
-            model_path,
+        # Determine base Qwen2.5-VL model based on OpenCUA model size
+        if "7B" in model_path or "7b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+        elif "3B" in model_path or "3b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
+        else:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+        
+        # Load Qwen2.5-VL processor (has min_pixels attribute)
+        processor = Qwen2_5_VLProcessor.from_pretrained(
+            qwen2_vl_base,
             trust_remote_code=True,
             use_fast=use_fast,
             **kwargs,
         )
+        
+        # Load image processor from OpenCUA model path if it exists
+        try:
+            from transformers import AutoImageProcessor
+            opencua_image_processor = AutoImageProcessor.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                **kwargs,
+            )
+            if hasattr(opencua_image_processor, "min_pixels"):
+                processor.image_processor = opencua_image_processor
+        except Exception:
+            # Use Qwen2.5-VL image processor if OpenCUA image processor not available
+            pass
         
         # Load Kimi-VL tokenizer and replace processor's tokenizer
         if self._cached_kimi_tokenizer is None:
