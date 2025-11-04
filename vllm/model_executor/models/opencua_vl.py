@@ -997,6 +997,61 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Replace processor's tokenizer with Kimi-VL tokenizer
         processor.tokenizer = self._cached_opencua_tokenizer
         
+        # Set processor.image_token and processor.video_token to match what Kimi-VL tokenizer can tokenize
+        # This ensures Qwen2VLDummyInputsBuilder generates dummy text that tokenizes to the correct token IDs
+        hf_config = self.get_hf_config()
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        
+        # Convert token IDs to token strings that Kimi-VL tokenizer recognizes
+        # This ensures processor.image_token/video_token are in the tokenizer's vocab
+        try:
+            image_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
+            video_token_str = self._cached_opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
+            
+            # Verify that these token strings encode back to the correct token IDs
+            image_encoded = self._cached_opencua_tokenizer.encode(image_token_str, add_special_tokens=False)
+            video_encoded = self._cached_opencua_tokenizer.encode(video_token_str, add_special_tokens=False)
+            
+            if image_encoded and len(image_encoded) == 1 and image_encoded[0] == image_token_id:
+                processor.image_token = image_token_str
+            else:
+                # Fallback: use tokenizer's vocab to find the token string
+                vocab = self._cached_opencua_tokenizer.get_vocab()
+                # Find token string that encodes to image_token_id
+                for token_str, token_id in vocab.items():
+                    if token_id == image_token_id:
+                        processor.image_token = token_str
+                        break
+                else:
+                    # Last resort: keep default (may not work correctly)
+                    logger.warning(
+                        f"Could not find token string for image_token_id={image_token_id}. "
+                        f"Using default processor.image_token={processor.image_token}"
+                    )
+            
+            if video_encoded and len(video_encoded) == 1 and video_encoded[0] == video_token_id:
+                processor.video_token = video_token_str
+            else:
+                # Fallback: use tokenizer's vocab to find the token string
+                vocab = self._cached_opencua_tokenizer.get_vocab()
+                # Find token string that encodes to video_token_id
+                for token_str, token_id in vocab.items():
+                    if token_id == video_token_id:
+                        processor.video_token = token_str
+                        break
+                else:
+                    # Last resort: keep default (may not work correctly)
+                    logger.warning(
+                        f"Could not find token string for video_token_id={video_token_id}. "
+                        f"Using default processor.video_token={processor.video_token}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Failed to set processor.image_token/video_token from token IDs: {e}. "
+                f"Using default processor tokens."
+            )
+        
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         # The original method counts tokens in text string and compares with tokenized IDs,
         # but OpenCUA tokenizer might not correctly tokenize the token string
@@ -1089,11 +1144,25 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        # Use Qwen2.5-VL's approach: get token IDs from processor's image_token/video_token strings
+        # This matches what Qwen2VLDummyInputsBuilder generates
+        # processor.image_token/video_token are already set to match Kimi-VL tokenizer vocab
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        # Get token IDs directly from OpenCUA_VLConfig (like Kimi-VL does)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+        
+        placeholder = {
+            "image": vocab[hf_processor.image_token],
+            "video": vocab[hf_processor.video_token],
+        }
+        
+        # Get token IDs from config for replacement (OpenCUA uses different token IDs)
         hf_config = self.info.get_hf_config()
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
+        replacement_token_id = {
+            "image": hf_config.image_token_id,
+            "video": hf_config.video_token_id,
+        }
 
         merge_length = image_processor.merge_size**2
 
@@ -1103,21 +1172,16 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
-            token_id = image_token_id if modality == "image" else video_token_id
 
-            return [token_id] * num_tokens
+            return [replacement_token_id[modality]] * num_tokens
 
         return [
             PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=partial(get_replacement_opencua, modality="image"),
-            ),
-            PromptReplacement(
-                modality="video",
-                target=[video_token_id],
-                replacement=partial(get_replacement_opencua, modality="video"),
-            ),
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_opencua, modality=modality),
+            )
+            for modality in ("image", "video")
         ]
 
 
