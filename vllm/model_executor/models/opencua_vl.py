@@ -1017,35 +1017,41 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         
         # Get OpenCUA config for token IDs
         hf_config = self.get_hf_config()
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
         
         # Set processor.image_token and processor.video_token to OpenCUA tokens
         # OpenCUA uses <|media_placeholder|> scheme instead of <|image_pad|>
         # CRITICAL: Must use media_placeholder, NOT image_pad or other names
         vocab = opencua_tokenizer.get_vocab()
         
-        # Convert token IDs to token strings
-        image_token_str = opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
-        video_token_str = opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
-        
         # CRITICAL: Must use <|media_placeholder|> for OpenCUA
         # This is required for proper text recognition
         if "<|media_placeholder|>" not in vocab:
             raise ValueError(
                 f"<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
-                f"This is required for proper text recognition. "
-                f"Found image_token_id={image_token_id} -> {image_token_str}"
+                f"This is required for proper text recognition."
             )
         
-        # Verify the token ID matches
+        # Get the actual token ID from vocab (not from config)
+        # This ensures we use the correct token ID that matches the tokenizer
         media_placeholder_id = vocab["<|media_placeholder|>"]
-        if media_placeholder_id != image_token_id:
+        
+        # CRITICAL: Sync config image_token_id with actual <|media_placeholder|> token ID
+        # This ensures placeholder matching works correctly for text recognition
+        if hasattr(hf_config, "image_token_id") and hf_config.image_token_id != media_placeholder_id:
             logger.warning(
-                f"<|media_placeholder|> token ID ({media_placeholder_id}) "
-                f"does not match config image_token_id ({image_token_id}). "
-                f"Using <|media_placeholder|> token ID."
+                f"Config image_token_id ({hf_config.image_token_id}) does not match "
+                f"actual <|media_placeholder|> token ID ({media_placeholder_id}). "
+                f"Updating config to use actual token ID."
             )
+            # Update config to use actual token ID
+            hf_config.image_token_id = media_placeholder_id
+            if hasattr(hf_config, "video_token_id"):
+                # Video token may also use the same placeholder
+                hf_config.video_token_id = media_placeholder_id
+        
+        # Use the actual token ID (from vocab, not from config)
+        image_token_id = media_placeholder_id
+        video_token_id = media_placeholder_id
         
         # Set processor tokens - MUST use media_placeholder
         processor.image_token = "<|media_placeholder|>"
@@ -1183,13 +1189,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         
-        # Get token IDs from config for replacement (OpenCUA uses different token IDs)
-        hf_config = self.info.get_hf_config()
-        replacement_token_id = {
-            "image": hf_config.image_token_id,
-            "video": hf_config.video_token_id,
-        }
-        
         # CRITICAL: Verify processor is using media_placeholder (not image_pad)
         if hf_processor.image_token != "<|media_placeholder|>":
             raise ValueError(
@@ -1199,36 +1198,48 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"Please ensure OpenCUA processor is correctly configured."
             )
         
-        # Get token IDs from vocab, with fallback to encoding if not found
-        try:
-            placeholder = {
-                "image": vocab[hf_processor.image_token],
-                "video": vocab[hf_processor.video_token],
-            }
-        except KeyError:
-            # Fallback: encode the token strings directly
-            image_token_ids = tokenizer.encode(
-                hf_processor.image_token, add_special_tokens=False
-            )
-            video_token_ids = tokenizer.encode(
-                hf_processor.video_token, add_special_tokens=False
-            )
-            placeholder = {
-                "image": image_token_ids[0] if image_token_ids else replacement_token_id["image"],
-                "video": video_token_ids[0] if video_token_ids else replacement_token_id["video"],
-            }
-            logger.warning(
-                f"processor.image_token={hf_processor.image_token} not in vocab, "
-                f"using encoded token ID: {placeholder['image']}"
+        # Get token IDs from vocab (actual token IDs, not from config)
+        # This ensures we use the correct token ID that matches the tokenizer
+        if hf_processor.image_token not in vocab:
+            raise ValueError(
+                f"processor.image_token '{hf_processor.image_token}' not found in vocab. "
+                f"This will break text recognition."
             )
         
-        # Verify placeholder token ID matches config
-        if placeholder["image"] != replacement_token_id["image"]:
+        # Get actual token ID from vocab
+        media_placeholder_id = vocab[hf_processor.image_token]
+        
+        # Get config for consistency check
+        hf_config = self.info.get_hf_config()
+        
+        # CRITICAL: Ensure config matches actual token ID
+        # This ensures placeholder matching works correctly
+        if hasattr(hf_config, "image_token_id") and hf_config.image_token_id != media_placeholder_id:
             logger.warning(
-                f"Placeholder token ID ({placeholder['image']}) "
-                f"does not match config image_token_id ({replacement_token_id['image']}). "
-                f"Using placeholder token ID."
+                f"Config image_token_id ({hf_config.image_token_id}) does not match "
+                f"actual <|media_placeholder|> token ID ({media_placeholder_id}). "
+                f"Using actual token ID from vocab."
             )
+            # Update config to use actual token ID
+            hf_config.image_token_id = media_placeholder_id
+            if hasattr(hf_config, "video_token_id"):
+                hf_config.video_token_id = media_placeholder_id
+        
+        # Use the actual token ID from vocab (not from config)
+        replacement_token_id = {
+            "image": media_placeholder_id,
+            "video": media_placeholder_id,  # OpenCUA may use same token
+        }
+        
+        placeholder = {
+            "image": media_placeholder_id,
+            "video": media_placeholder_id,
+        }
+        
+        logger.debug(
+            f"Using <|media_placeholder|> token ID {media_placeholder_id} "
+            f"for image/video placeholder replacement"
+        )
 
         merge_length = image_processor.merge_size**2
 
