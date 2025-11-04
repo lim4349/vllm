@@ -941,12 +941,11 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_processor is not None:
             return self._cached_processor
         
-        from transformers import AutoProcessor, AutoTokenizer
+        from transformers import AutoProcessor
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Load Kimi-VL processor (OpenCUA uses the same processor and tokenizer as Kimi-VL)
         # Determine Kimi-VL model based on OpenCUA model size
         if "7B" in model_path or "7b" in model_path:
             kimi_vl_model = "moonshotai/Kimi-VL-A7B-Instruct"
@@ -955,125 +954,28 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             kimi_vl_model = "moonshotai/Kimi-VL-A7B-Instruct"
         
-        try:
-            # Load Kimi-VL processor (includes image_processor, tokenizer)
-            processor = AutoProcessor.from_pretrained(
-                kimi_vl_model,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
+        # Load Kimi-VL processor (includes image_processor, tokenizer, chat_template)
+        processor = AutoProcessor.from_pretrained(
+            kimi_vl_model,
+            trust_remote_code=True,
+            use_fast=use_fast,
+        )
+        logger.info(
+            f"Loaded Kimi-VL processor from: {kimi_vl_model}, "
+            f"processor type: {type(processor).__name__}"
+        )
+        
+        # Cache the tokenizer
+        if self._cached_opencua_tokenizer is None:
+            self._cached_opencua_tokenizer = processor.tokenizer
             logger.info(
-                f"Loaded Kimi-VL processor from: {kimi_vl_model}, "
-                f"processor type: {type(processor).__name__}"
+                f"Cached Kimi-VL tokenizer, "
+                f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
             )
-            
-            # Cache the tokenizer and chat_template
-            if self._cached_opencua_tokenizer is None:
-                self._cached_opencua_tokenizer = processor.tokenizer
-                logger.info(
-                    f"Cached Kimi-VL tokenizer, "
-                    f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
-                )
-            
-            # Kimi-VL processor already has correct tokenizer and chat_template
-            # Cache the processor and return
-            self._cached_processor = processor
-            return processor
-        except Exception as e:
-            # Fallback to Qwen2.5-VL processor if Kimi-VL processor is not available
-            logger.warning(
-                f"Failed to load Kimi-VL processor from {kimi_vl_model}: {e}. "
-                f"Falling back to Qwen2.5-VL processor with Kimi-VL tokenizer."
-            )
-            
-            # Load Qwen2.5-VL processor as fallback
-            if "7B" in model_path or "7b" in model_path:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-            elif "3B" in model_path or "3b" in model_path:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
-            else:
-                qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-            
-            processor = AutoProcessor.from_pretrained(
-                qwen2_vl_base,
-                trust_remote_code=True,
-                use_fast=use_fast,
-            )
-            
-            # Load Kimi-VL tokenizer separately
-            if self._cached_opencua_tokenizer is None:
-                try:
-                    self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
-                        kimi_vl_model,
-                        trust_remote_code=True,
-                        use_fast=use_fast,
-                    )
-                    logger.info(
-                        f"Loaded Kimi-VL tokenizer from: {kimi_vl_model}, "
-                        f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
-                    )
-                except Exception as e2:
-                    # Fallback to OpenCUA model if Kimi-VL model is not available
-                    logger.warning(
-                        f"Failed to load Kimi-VL tokenizer from {kimi_vl_model}: {e2}. "
-                        f"Falling back to OpenCUA model tokenizer."
-                    )
-                    self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
-                        model_path,
-                        trust_remote_code=True,
-                        use_fast=use_fast,
-                    )
-                    logger.info(
-                        f"Loaded tokenizer from OpenCUA model: {model_path}, "
-                        f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
-                    )
-            
-            # Replace processor's tokenizer with Kimi-VL tokenizer
-            processor.tokenizer = self._cached_opencua_tokenizer
         
-        # For fallback case: set processor.image_token/video_token if needed
-        # and apply monkey patch for _check_special_mm_tokens
-        hf_config = self.get_hf_config()
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        
-        # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
-        def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
-            """Patched version that uses OpenCUA config token IDs directly"""
-            if modalities is None:
-                modalities = ["image", "video"]
-            
-            # Get input_ids tensor/list
-            input_ids = text_inputs["input_ids"]
-            if hasattr(input_ids, "tolist"):
-                input_ids_list = input_ids.tolist()
-                if isinstance(input_ids_list[0], list):
-                    input_ids_list = input_ids_list[0]
-            else:
-                input_ids_list = input_ids
-            
-            for modality in modalities:
-                if modality == "image":
-                    token_id = image_token_id
-                elif modality == "video":
-                    token_id = video_token_id
-                else:
-                    continue
-                
-                # Count occurrences in tokenized input_ids using config token ID
-                ids_count = input_ids_list.count(token_id)
-                
-                if ids_count > 0:
-                    logger.debug(
-                        f"Found {ids_count} {modality} token(s) (token_id={token_id}) in input_ids"
-                    )
-        
-        # Apply the monkey patch
-        processor._check_special_mm_tokens = patched_check_special_mm_tokens
-        
-        # Cache the processor to avoid reloading
+        # Kimi-VL processor already has correct tokenizer and chat_template
+        # Cache the processor and return
         self._cached_processor = processor
-        
         return processor
 
 
@@ -1102,24 +1004,11 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         
-        # Get token IDs from vocab, with fallback to encoding if not found
-        try:
-            placeholder = {
-                "image": vocab[hf_processor.image_token],
-                "video": vocab[hf_processor.video_token],
-            }
-        except KeyError:
-            # Fallback: encode the token strings directly
-            image_token_ids = tokenizer.encode(hf_processor.image_token, add_special_tokens=False)
-            video_token_ids = tokenizer.encode(hf_processor.video_token, add_special_tokens=False)
-            placeholder = {
-                "image": image_token_ids[0] if image_token_ids else hf_config.image_token_id,
-                "video": video_token_ids[0] if video_token_ids else hf_config.video_token_id,
-            }
-            logger.warning(
-                f"processor.image_token={hf_processor.image_token} not in vocab, "
-                f"using encoded token ID: {placeholder['image']}"
-            )
+        # Get token IDs from vocab
+        placeholder = {
+            "image": vocab[hf_processor.image_token],
+            "video": vocab[hf_processor.video_token],
+        }
         
         # Get token IDs from config for replacement (OpenCUA uses different token IDs)
         hf_config = self.info.get_hf_config()
