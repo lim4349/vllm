@@ -997,25 +997,28 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Replace processor's tokenizer with Kimi-VL tokenizer
         processor.tokenizer = self._cached_opencua_tokenizer
         
-        # Get image/video token IDs from OpenCUA config and set processor's image_token
+        # Get image/video token IDs from OpenCUA config and set processor's image_token/video_token
         # OpenCUA tokenizer (TikTokenV3) needs the correct token strings that it recognizes
         hf_config = self.get_hf_config()
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         
-        # Convert token IDs to token strings that OpenCUA tokenizer recognizes
-        # This is necessary because Qwen2.5-VL processor's image_token (<|image_pad|>)
-        # cannot be encoded by OpenCUA tokenizer (TikTokenV3)
-        # We need to ensure the token string can be properly encoded back to the token ID
-        # For OpenCUA, we need to use the actual token IDs from config directly
-        # because the token strings don't encode correctly to the token IDs
-        # Instead, we'll use the token IDs directly in _get_prompt_updates
-        # So we keep processor.image_token as Qwen2.5-VL's default for compatibility
-        # but use config token IDs for actual matching
-        logger.info(
-            f"OpenCUA image_token_id={image_token_id}, video_token_id={video_token_id}. "
-            f"Will use these IDs directly for prompt replacement."
-        )
+        # Convert token IDs to token strings using Kimi-VL tokenizer
+        # This ensures processor.image_token/video_token are in the tokenizer's vocab
+        try:
+            image_token_str = self._cached_opencua_tokenizer.decode([image_token_id])
+            video_token_str = self._cached_opencua_tokenizer.decode([video_token_id])
+            processor.image_token = image_token_str
+            processor.video_token = video_token_str
+            logger.info(
+                f"Set processor.image_token={image_token_str}, "
+                f"processor.video_token={video_token_str} from OpenCUA token IDs"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to decode token IDs to strings: {e}. "
+                f"Using default processor tokens."
+            )
         
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         # The original method counts tokens in text string and compares with tokenized IDs,
@@ -1134,10 +1137,20 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         
-        placeholder = {
-            "image": vocab[hf_processor.image_token],
-            "video": vocab[hf_processor.video_token],
-        }
+        # Get token IDs from vocab, with fallback to encoding if not found
+        try:
+            placeholder = {
+                "image": vocab[hf_processor.image_token],
+                "video": vocab[hf_processor.video_token],
+            }
+        except KeyError:
+            # Fallback: encode the token strings directly
+            image_token_ids = tokenizer.encode(hf_processor.image_token, add_special_tokens=False)
+            video_token_ids = tokenizer.encode(hf_processor.video_token, add_special_tokens=False)
+            placeholder = {
+                "image": image_token_ids[0] if image_token_ids else hf_config.image_token_id,
+                "video": video_token_ids[0] if video_token_ids else hf_config.video_token_id,
+            }
 
         merge_length = image_processor.merge_size**2
 
