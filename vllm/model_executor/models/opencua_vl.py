@@ -9,6 +9,7 @@
 
 """Inference-only OpenCUA-VL model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -1012,13 +1013,38 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 if hasattr(qwen_image_processor, "min_pixels"):
                     opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
                     logger.info("Added min_pixels to OpenCUA image processor from Qwen2.5-VL")
+            # CRITICAL: Get default max_pixels from image processor config
+            # Use Qwen2.5-VL processor's max_pixels as default (from config)
+            default_max_pixels = None
+            if hasattr(qwen_image_processor, "max_pixels"):
+                default_max_pixels = qwen_image_processor.max_pixels
+                logger.info(f"Using default max_pixels from Qwen2.5-VL processor: {default_max_pixels}")
+            
+            # Allow override via OPENCUA_MAX_PIXELS environment variable
+            if "OPENCUA_MAX_PIXELS" in os.environ:
+                try:
+                    default_max_pixels = int(os.environ["OPENCUA_MAX_PIXELS"])
+                    logger.info(f"Using OPENCUA_MAX_PIXELS from environment: {default_max_pixels}")
+                except ValueError:
+                    logger.warning(f"Invalid OPENCUA_MAX_PIXELS value, using default: {default_max_pixels}")
+            
+            if default_max_pixels is None:
+                # Fallback: use a reasonable default if not found in config
+                default_max_pixels = 30_000_000  # 30M pixels for high-quality text recognition
+                logger.warning(f"max_pixels not found in config, using fallback: {default_max_pixels}")
+            
             if not hasattr(opencua_image_processor, "max_pixels"):
-                if hasattr(qwen_image_processor, "max_pixels"):
-                    # For better text recognition, use higher max_pixels if available
-                    # This allows the model to process images at higher resolution
-                    opencua_image_processor.max_pixels = qwen_image_processor.max_pixels
+                # Use default max_pixels from config
+                opencua_image_processor.max_pixels = default_max_pixels
+                logger.info(f"Set max_pixels to {default_max_pixels} for OpenCUA image processor")
+            else:
+                # Use the higher value between OpenCUA and Qwen2.5-VL configs
+                current_max = opencua_image_processor.max_pixels
+                if default_max_pixels is not None and default_max_pixels > current_max:
+                    opencua_image_processor.max_pixels = default_max_pixels
                     logger.info(
-                        f"Added max_pixels to OpenCUA image processor: {qwen_image_processor.max_pixels}"
+                        f"Upgraded max_pixels from {current_max} to {default_max_pixels} "
+                        f"from config for better text recognition"
                     )
             # Log the actual pixel limits for debugging
             if hasattr(opencua_image_processor, "min_pixels") and hasattr(opencua_image_processor, "max_pixels"):
