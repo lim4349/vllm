@@ -941,34 +941,63 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_processor is not None:
             return self._cached_processor
         
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor, AutoTokenizer
         
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        kimi_vl_model = "moonshotai/Kimi-VL-A3B-Instruct"
+        # Load OpenCUA processor (Qwen2.5-VL based, has image_processor with min_pixels/max_pixels)
+        if "7B" in model_path or "7b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+        elif "3B" in model_path or "3b" in model_path:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
+        else:
+            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
-        # Load Kimi-VL processor (includes image_processor, tokenizer, chat_template)
         processor = AutoProcessor.from_pretrained(
-            kimi_vl_model,
+            qwen2_vl_base,
             trust_remote_code=True,
             use_fast=use_fast,
         )
-        logger.info(
-            f"Loaded Kimi-VL processor from: {kimi_vl_model}, "
-            f"processor type: {type(processor).__name__}"
-        )
         
-        # Cache the tokenizer
+        # Determine Kimi-VL model based on OpenCUA model size for tokenizer
+        kimi_vl_model = "moonshotai/Kimi-VL-A3B-Instruct"
+
+        # Load Kimi-VL tokenizer (OpenCUA uses the same tokenizer as Kimi-VL)
         if self._cached_opencua_tokenizer is None:
-            self._cached_opencua_tokenizer = processor.tokenizer
+            self._cached_opencua_tokenizer = AutoTokenizer.from_pretrained(
+                kimi_vl_model,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
             logger.info(
-                f"Cached Kimi-VL tokenizer, "
+                f"Loaded Kimi-VL tokenizer from: {kimi_vl_model}, "
                 f"tokenizer type: {type(self._cached_opencua_tokenizer).__name__}"
             )
         
-        # Kimi-VL processor already has correct tokenizer and chat_template
-        # Cache the processor and return
+        # Replace processor's tokenizer with Kimi-VL tokenizer
+        processor.tokenizer = self._cached_opencua_tokenizer
+        
+        # Get Kimi-VL chat template from Kimi-VL tokenizer
+        chat_template = None
+        if hasattr(self._cached_opencua_tokenizer, "chat_template") and self._cached_opencua_tokenizer.chat_template:
+            chat_template = self._cached_opencua_tokenizer.chat_template
+            logger.info("Found chat_template attribute in Kimi-VL tokenizer")
+        elif hasattr(self._cached_opencua_tokenizer, "get_chat_template"):
+            try:
+                chat_template = self._cached_opencua_tokenizer.get_chat_template()
+                logger.info("Retrieved chat_template via get_chat_template() from Kimi-VL tokenizer")
+            except Exception as e:
+                logger.warning(f"Failed to get chat_template from Kimi-VL tokenizer: {e}")
+        
+        # Set chat_template to both processor and tokenizer
+        if chat_template:
+            processor.chat_template = chat_template
+            if hasattr(self._cached_opencua_tokenizer, "chat_template"):
+                self._cached_opencua_tokenizer.chat_template = chat_template
+            logger.info("Set Kimi-VL chat_template to processor and tokenizer")
+        
+        # Cache the processor to avoid reloading
         self._cached_processor = processor
         return processor
 
