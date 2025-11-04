@@ -946,13 +946,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Determine Kimi-VL model based on OpenCUA model size
-        if "7B" in model_path or "7b" in model_path:
-            kimi_vl_model = "moonshotai/Kimi-VL-A7B-Instruct"
-        elif "3B" in model_path or "3b" in model_path:
-            kimi_vl_model = "moonshotai/Kimi-VL-A3B-Instruct"
-        else:
-            kimi_vl_model = "moonshotai/Kimi-VL-A7B-Instruct"
+        kimi_vl_model = "moonshotai/Kimi-VL-A3B-Instruct"
         
         # Load Kimi-VL processor (includes image_processor, tokenizer, chat_template)
         processor = AutoProcessor.from_pretrained(
