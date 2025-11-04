@@ -1293,7 +1293,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             f"for image/video placeholder replacement"
         )
 
+        # CRITICAL: merge_size는 spatial_merge_size와 일치해야 함
+        # Qwen2.5-VL과 동일하게 image_processor.merge_size 사용
         merge_length = image_processor.merge_size**2
+        # 검증: merge_size가 실제 spatial_merge_size와 일치하는지 확인
+        hf_config = self.info.get_hf_config()
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        if image_processor.merge_size != spatial_merge_size:
+            logger.warning(
+                f"image_processor.merge_size ({image_processor.merge_size}) != "
+                f"spatial_merge_size ({spatial_merge_size}). "
+                f"Using image_processor.merge_size for compatibility."
+            )
 
         def get_replacement_opencua(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
@@ -1301,22 +1312,30 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             # CRITICAL: placeholder ↔ grid 일치 assertion
-            # grid_thw로 계산된 visual token 수 (t×h×w // merge_length)
-            num_tokens = int(grid_thw.prod()) // merge_length
+            # grid_thw shape: (t, h, w) - temporal, height, width in patches
+            # merge 후 실제 visual token 수 = (t×h×w) // merge_length
+            # merge_length = spatial_merge_size^2 (예: 2^2 = 4)
+            grid_t, grid_h, grid_w = map(int, grid_thw)
+            total_patches = grid_t * grid_h * grid_w
+            num_tokens = total_patches // merge_length
             
-            # Assertion: visual token 수가 0보다 커야 함
+            # CRITICAL: visual token 수가 0보다 커야 함
             assert num_tokens > 0, (
                 f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
-                f"(grid_thw={grid_thw.tolist()}, merge_length={merge_length}). "
+                f"(grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
+                f"total_patches={total_patches}, merge_length={merge_length}). "
                 f"This will break text recognition. "
                 f"Check image processing configuration."
             )
             
-            logger.debug(
-                f"{modality} item {item_idx}: "
-                f"grid_thw={grid_thw.tolist()}, "
-                f"visual_tokens={num_tokens}, "
-                f"merge_length={merge_length}"
+            # CRITICAL: 디버깅을 위한 상세 로깅
+            logger.info(
+                f"{modality.upper()} item {item_idx} replacement: "
+                f"grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
+                f"total_patches={total_patches}, "
+                f"merge_length={merge_length}, "
+                f"num_visual_tokens={num_tokens}, "
+                f"replacement_token_id={replacement_token_id[modality]}"
             )
 
             return [replacement_token_id[modality]] * num_tokens
@@ -1368,10 +1387,12 @@ class OpenCUA_VLForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        # CRITICAL: OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
+        # This must match processor.image_token and processor.video_token
         if modality.startswith("image"):
-            return "<|vision_start|><|image_pad|><|vision_end|>"
+            return "<|media_placeholder|>"
         if modality.startswith("video"):
-            return "<|vision_start|><|video_pad|><|vision_end|>"
+            return "<|media_placeholder|>"  # OpenCUA uses same token for video
 
         raise ValueError("Only image or video modality is supported")
 
