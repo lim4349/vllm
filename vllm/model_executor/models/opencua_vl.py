@@ -734,7 +734,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         total_tokens = grid_t * llm_grid_h * llm_grid_w
         
         # Simple sequential indexing for 1D RoPE
+        # index는 merge 전 토큰 인덱스 (0 ~ total_tokens-1)
         index = torch.arange(total_tokens)
+        
+        # cu_seqlens_window는 window attention을 위한 누적 시퀀스 길이
+        # 각 merge된 토큰 그룹당 spatial_merge_unit 개의 토큰이 있음
+        # 따라서 전체 시퀀스 길이는 total_tokens * spatial_merge_unit
         cu_seqlens = torch.tensor(
             [0, total_tokens * self.spatial_merge_unit], dtype=torch.int32
         )
@@ -745,15 +750,40 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_1d(self, t, h, w):
         """Get 1D RoPE embeddings instead of 3D M-RoPE"""
         window_index_1d, cu_seqlens_window_1d = self.get_window_index_1d(t, h, w)
-        total_tokens = (
-            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
-        )
-        # Actual sequence length after spatial merge unit expansion
-        actual_seq_len = total_tokens * self.spatial_merge_unit
-        # Generate rotary position embeddings for actual sequence length
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(actual_seq_len)
+        llm_grid_h = h // self.spatial_merge_size
+        llm_grid_w = w // self.spatial_merge_size
+        total_tokens = t * llm_grid_h * llm_grid_w
         
-        cu_seqlens_1d = torch.tensor([total_tokens], dtype=torch.int32)
+        # Actual sequence length after spatial merge unit expansion
+        # merge 후 실제 시퀀스 길이 = total_tokens * spatial_merge_unit
+        actual_seq_len = total_tokens * self.spatial_merge_unit
+        
+        # Generate rotary position embeddings for actual sequence length
+        # rotary_pos_emb_1d shape: [actual_seq_len, head_dim // 2]
+        rotary_pos_emb_1d_full = self.rotary_pos_emb_1d(actual_seq_len)
+        
+        # CRITICAL: Qwen2.5-VL과 동일한 shape로 reshape 필요
+        # rotary_pos_emb_thw는 [total_tokens // spatial_merge_unit, spatial_merge_unit, head_dim // 2]
+        # 1D RoPE도 동일한 shape로 reshape: [total_tokens, spatial_merge_unit, head_dim // 2]
+        rotary_pos_emb_1d = rotary_pos_emb_1d_full.view(
+            total_tokens, self.spatial_merge_unit, -1
+        )
+        
+        # window_index로 인덱싱 (Qwen2.5-VL과 동일)
+        rotary_pos_emb_1d = rotary_pos_emb_1d[window_index_1d, :, :]
+        
+        # Flatten (Qwen2.5-VL과 동일)
+        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
+        # 최종 shape: [actual_seq_len, head_dim // 2]
+        
+        # CRITICAL: cu_seqlens_1d는 Qwen2.5-VL의 cu_seqlens_thw와 동일한 형식이어야 함
+        # Qwen2.5-VL은 각 이미지/프레임별로 h*w를 반복함
+        # 1D RoPE에서는 각 프레임별로 llm_h * llm_w를 반복 (merge 전 토큰 수)
+        per_frame_tokens = llm_grid_h * llm_grid_w
+        cu_seqlens_1d = torch.repeat_interleave(
+            torch.tensor([per_frame_tokens], dtype=torch.int32), t
+        )
+        
         return (
             rotary_pos_emb_1d,
             window_index_1d,
