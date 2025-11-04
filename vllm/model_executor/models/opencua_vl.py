@@ -993,11 +993,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # This is required for _check_special_mm_tokens validation to pass
         # Qwen2VLDummyInputsBuilder uses processor.image_token to generate dummy text
         hf_config = self.get_hf_config()
-        vocab = opencua_tokenizer.get_vocab()
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
         
         # Convert OpenCUA token IDs to token strings using OpenCUA tokenizer
-        image_token_str = opencua_tokenizer.convert_ids_to_tokens([hf_config.image_token_id])[0]
-        video_token_str = opencua_tokenizer.convert_ids_to_tokens([hf_config.video_token_id])[0]
+        vocab = opencua_tokenizer.get_vocab()
+        image_token_str = opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
+        video_token_str = opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
         
         # Set processor tokens if they exist in vocab
         if image_token_str in vocab:
@@ -1005,11 +1007,31 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if video_token_str in vocab:
             processor.video_token = video_token_str
         
-        # Monkey patch _check_special_mm_tokens to bypass validation
-        # since Qwen2.5-VL processor expects Qwen2.5-VL tokenizer format
+        # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
-            # Skip validation for OpenCUA tokenizer
-            return
+            """Patched version that uses OpenCUA config token IDs directly"""
+            if modalities is None:
+                modalities = ["image", "video"]
+            
+            input_ids_list = text_inputs["input_ids"].tolist()[0]
+            
+            for modality in modalities:
+                if modality == "image":
+                    token_id = image_token_id
+                elif modality == "video":
+                    token_id = video_token_id
+                else:
+                    continue
+                
+                # Count occurrences in tokenized input_ids using config token ID
+                ids_count = input_ids_list.count(token_id)
+                
+                if ids_count > 0:
+                    logger.debug(
+                        f"Found {ids_count} {modality} token(s) (token_id={token_id}) in input_ids"
+                    )
+        
+        # Apply the monkey patch
         processor._check_special_mm_tokens = patched_check_special_mm_tokens
         
         # Get OpenCUA chat template from OpenCUA tokenizer
@@ -1051,32 +1073,12 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        # Get token IDs from processor's image_token/video_token strings
+        # Use Qwen2.5-VL's approach: get token IDs from processor's image_token/video_token strings
         # This matches what Qwen2VLDummyInputsBuilder generates
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        
-        # Get token IDs from processor tokens (used for matching)
-        # Try vocab first, then tokenizer.encode() as fallback
-        placeholder = {}
-        for modality in ("image", "video"):
-            token_str = getattr(hf_processor, f"{modality}_token")
-            try:
-                vocab = tokenizer.get_vocab()
-                placeholder[modality] = vocab[token_str]
-            except KeyError:
-                # If token string not in vocab, encode it directly
-                encoded = tokenizer.encode(token_str, add_special_tokens=False)
-                if len(encoded) == 1:
-                    placeholder[modality] = encoded[0]
-                else:
-                    # If tokenizes to multiple tokens, use first token
-                    placeholder[modality] = encoded[0]
-                    logger.warning(
-                        f"{modality}_token '{token_str}' tokenizes to {len(encoded)} tokens, "
-                        f"using first token: {encoded[0]}"
-                    )
+        vocab = tokenizer.get_vocab()
         
         # Get token IDs from config for replacement (OpenCUA uses different token IDs)
         hf_config = self.info.get_hf_config()
@@ -1084,6 +1086,29 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "image": hf_config.image_token_id,
             "video": hf_config.video_token_id,
         }
+        
+        # Get token IDs from vocab, with fallback to encoding if not found
+        try:
+            placeholder = {
+                "image": vocab[hf_processor.image_token],
+                "video": vocab[hf_processor.video_token],
+            }
+        except KeyError:
+            # Fallback: encode the token strings directly
+            image_token_ids = tokenizer.encode(
+                hf_processor.image_token, add_special_tokens=False
+            )
+            video_token_ids = tokenizer.encode(
+                hf_processor.video_token, add_special_tokens=False
+            )
+            placeholder = {
+                "image": image_token_ids[0] if image_token_ids else replacement_token_id["image"],
+                "video": video_token_ids[0] if video_token_ids else replacement_token_id["video"],
+            }
+            logger.warning(
+                f"processor.image_token={hf_processor.image_token} not in vocab, "
+                f"using encoded token ID: {placeholder['image']}"
+            )
 
         merge_length = image_processor.merge_size**2
 
