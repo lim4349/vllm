@@ -1051,19 +1051,32 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        # Use Qwen2.5-VL's approach: get token IDs from processor's image_token/video_token strings
+        # Get token IDs from processor's image_token/video_token strings
         # This matches what Qwen2VLDummyInputsBuilder generates
-        # processor.image_token/video_token are already set to match Kimi-VL tokenizer vocab
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
         
-        # Get token IDs from vocab
-        placeholder = {
-            "image": vocab[hf_processor.image_token],
-            "video": vocab[hf_processor.video_token],
-        }
+        # Get token IDs from processor tokens (used for matching)
+        # Try vocab first, then tokenizer.encode() as fallback
+        placeholder = {}
+        for modality in ("image", "video"):
+            token_str = getattr(hf_processor, f"{modality}_token")
+            try:
+                vocab = tokenizer.get_vocab()
+                placeholder[modality] = vocab[token_str]
+            except KeyError:
+                # If token string not in vocab, encode it directly
+                encoded = tokenizer.encode(token_str, add_special_tokens=False)
+                if len(encoded) == 1:
+                    placeholder[modality] = encoded[0]
+                else:
+                    # If tokenizes to multiple tokens, use first token
+                    placeholder[modality] = encoded[0]
+                    logger.warning(
+                        f"{modality}_token '{token_str}' tokenizes to {len(encoded)} tokens, "
+                        f"using first token: {encoded[0]}"
+                    )
         
         # Get token IDs from config for replacement (OpenCUA uses different token IDs)
         hf_config = self.info.get_hf_config()
