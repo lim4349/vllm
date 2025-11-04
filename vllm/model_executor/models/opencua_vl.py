@@ -946,13 +946,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Determine base Qwen2.5-VL model based on OpenCUA model size (for processor fallback)
-        if "7B" in model_path or "7b" in model_path:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-        elif "3B" in model_path or "3b" in model_path:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-3B-Instruct"
-        else:
-            qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
+        qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
         # Priority 1: Try to load image processor from OpenCUA model path
         opencua_image_processor = None
@@ -980,8 +974,21 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         )
         
         # Replace image processor with OpenCUA's if available
-        if opencua_image_processor is not None and hasattr(opencua_image_processor, "min_pixels"):
+        # OpenCUA image processor may not have min_pixels/max_pixels, but we should use it anyway
+        if opencua_image_processor is not None:
+            # If OpenCUA image processor doesn't have min_pixels/max_pixels,
+            # add them from Qwen2.5-VL processor
+            qwen_image_processor = processor.image_processor
+            if not hasattr(opencua_image_processor, "min_pixels"):
+                if hasattr(qwen_image_processor, "min_pixels"):
+                    opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
+                    logger.info("Added min_pixels to OpenCUA image processor from Qwen2.5-VL")
+            if not hasattr(opencua_image_processor, "max_pixels"):
+                if hasattr(qwen_image_processor, "max_pixels"):
+                    opencua_image_processor.max_pixels = qwen_image_processor.max_pixels
+                    logger.info("Added max_pixels to OpenCUA image processor from Qwen2.5-VL")
             processor.image_processor = opencua_image_processor
+            logger.info("Replaced processor image_processor with OpenCUA image processor")
         
         # Load OpenCUA tokenizer (highest priority)
         opencua_tokenizer = AutoTokenizer.from_pretrained(
