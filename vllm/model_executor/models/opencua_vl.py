@@ -1043,34 +1043,40 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         elif hasattr(opencua_tokenizer, "eos_token") and opencua_tokenizer.eos_token:
             eos_token_id = opencua_tokenizer.convert_tokens_to_ids(opencua_tokenizer.eos_token)
         
-        # Assertion: config의 image_token_id가 EOS와 같으면 안 됨
+        # CRITICAL: EOS 토큰 ID 검증 - config의 image_token_id가 EOS와 같으면 안 됨
         if hasattr(hf_config, "image_token_id") and eos_token_id is not None:
             if hf_config.image_token_id == eos_token_id:
-                raise ValueError(
+                logger.error(
                     f"Config image_token_id ({hf_config.image_token_id}) is EOS token ID! "
                     f"This will cause serious issues. "
                     f"Expected <|media_placeholder|> ID: {media_placeholder_id}, "
-                    f"EOS token ID: {eos_token_id}"
+                    f"EOS token ID: {eos_token_id}. "
+                    f"Auto-correcting to <|media_placeholder|> ID."
                 )
         
-        # Assertion: <|media_placeholder|> ID도 EOS와 같으면 안 됨
+        # CRITICAL: <|media_placeholder|> ID도 EOS와 같으면 안 됨
         if eos_token_id is not None and media_placeholder_id == eos_token_id:
             raise ValueError(
                 f"<|media_placeholder|> token ID ({media_placeholder_id}) is EOS token ID! "
-                f"This will cause serious issues. "
-                f"EOS token ID: {eos_token_id}"
+                f"This is a critical configuration error. "
+                f"EOS token ID: {eos_token_id}. "
+                f"Please check the tokenizer configuration."
             )
         
         # CRITICAL: 모델 config 동기화 - 항상 토크나이저에서 실제 ID를 조회해서 config를 덮어쓰기
         # 런타임에서 업데이트하므로 엔진 재기동 시에도 올바른 ID가 사용됨
         if hasattr(hf_config, "image_token_id"):
             if hf_config.image_token_id != media_placeholder_id:
-                logger.warning(
-                    f"Config image_token_id ({hf_config.image_token_id}) != "
-                    f"actual <|media_placeholder|> ({media_placeholder_id}). "
-                    f"Updating config."
-                )
-            # 항상 실제 token ID로 덮어쓰기
+                if eos_token_id is not None and hf_config.image_token_id == eos_token_id:
+                    # EOS와 같으면 이미 위에서 에러 로그 출력
+                    pass
+                else:
+                    logger.warning(
+                        f"Config image_token_id ({hf_config.image_token_id}) != "
+                        f"actual <|media_placeholder|> ({media_placeholder_id}). "
+                        f"Updating config."
+                    )
+            # 항상 실제 token ID로 덮어쓰기 (EOS와 같아도 자동 수정)
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
