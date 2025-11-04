@@ -1022,32 +1022,46 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         
         # Set processor.image_token and processor.video_token to OpenCUA tokens
         # OpenCUA uses <|media_placeholder|> scheme instead of <|image_pad|>
+        # CRITICAL: Must use media_placeholder, NOT image_pad or other names
         vocab = opencua_tokenizer.get_vocab()
         
         # Convert token IDs to token strings
         image_token_str = opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
         video_token_str = opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
         
-        # Set processor tokens - prefer OpenCUA media tokens if available
-        if "<|media_placeholder|>" in vocab:
-            processor.image_token = "<|media_placeholder|>"
-            processor.video_token = "<|media_placeholder|>"  # OpenCUA may use same token
-            logger.info("Set processor tokens to OpenCUA media tokens")
-        elif image_token_str in vocab:
-            processor.image_token = image_token_str
-            if video_token_str in vocab:
-                processor.video_token = video_token_str
-            logger.info(f"Set processor tokens from OpenCUA tokenizer: {image_token_str}")
-        else:
-            # Fallback: use tokenizer's special tokens
-            if hasattr(opencua_tokenizer, "special_tokens_map"):
-                special_tokens = opencua_tokenizer.special_tokens_map
-                if "additional_special_tokens" in special_tokens:
-                    for token in special_tokens["additional_special_tokens"]:
-                        if "media" in token.lower() or "placeholder" in token.lower():
-                            processor.image_token = token
-                            logger.info(f"Set processor.image_token to {token} from special tokens")
-                            break
+        # CRITICAL: Must use <|media_placeholder|> for OpenCUA
+        # This is required for proper text recognition
+        if "<|media_placeholder|>" not in vocab:
+            raise ValueError(
+                f"<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
+                f"This is required for proper text recognition. "
+                f"Found image_token_id={image_token_id} -> {image_token_str}"
+            )
+        
+        # Verify the token ID matches
+        media_placeholder_id = vocab["<|media_placeholder|>"]
+        if media_placeholder_id != image_token_id:
+            logger.warning(
+                f"<|media_placeholder|> token ID ({media_placeholder_id}) "
+                f"does not match config image_token_id ({image_token_id}). "
+                f"Using <|media_placeholder|> token ID."
+            )
+        
+        # Set processor tokens - MUST use media_placeholder
+        processor.image_token = "<|media_placeholder|>"
+        processor.video_token = "<|media_placeholder|>"  # OpenCUA uses same token
+        logger.info(
+            f"Set processor tokens to <|media_placeholder|> "
+            f"(token_id={media_placeholder_id})"
+        )
+        
+        # Verify processor is NOT using wrong token names
+        if processor.image_token != "<|media_placeholder|>":
+            raise ValueError(
+                f"processor.image_token must be '<|media_placeholder|>', "
+                f"but got '{processor.image_token}'. "
+                f"This will break text recognition."
+            )
         
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
@@ -1100,18 +1114,45 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             processor.chat_template = chat_template
             logger.info("Set OpenCUA chat_template to processor")
         
-        # Validate special tokens exist in tokenizer
+        # Validate special tokens exist in tokenizer and are NOT UNK
+        # CRITICAL: All these tokens must exist and not be UNK for proper text recognition
         special_tokens_to_check = [
-            "<|media_placeholder|>", "<|media_begin|>", "<|media_end|>",
-            "<|media_content|>", "<|im_user|>", "<|im_assistant|>", "<|im_end|>"
+            "<|im_user|>", "<|im_assistant|>", "<|im_end|>",
+            "<|media_begin|>", "<|media_content|>", 
+            "<|media_placeholder|>", "<|media_end|>"
         ]
+        
+        unk_token_id = opencua_tokenizer.unk_token_id if hasattr(opencua_tokenizer, "unk_token_id") else None
+        
+        missing_tokens = []
+        unk_tokens = []
         for token_str in special_tokens_to_check:
-            if token_str in vocab:
+            if token_str not in vocab:
+                missing_tokens.append(token_str)
+            else:
                 token_id = vocab[token_str]
-                assert token_id != opencua_tokenizer.unk_token_id, (
-                    f"{token_str} found but has unk_token_id: {token_id}"
-                )
-                logger.debug(f"Validated token: {token_str} -> {token_id}")
+                if unk_token_id is not None and token_id == unk_token_id:
+                    unk_tokens.append(f"{token_str} (id={token_id})")
+                else:
+                    logger.debug(f"Validated token: {token_str} -> {token_id}")
+        
+        if missing_tokens:
+            raise ValueError(
+                f"Missing required OpenCUA special tokens: {missing_tokens}. "
+                f"This will break text recognition."
+            )
+        
+        if unk_tokens:
+            raise ValueError(
+                f"OpenCUA special tokens mapped to UNK: {unk_tokens}. "
+                f"This will break text recognition. "
+                f"unk_token_id={unk_token_id}"
+            )
+        
+        logger.info(
+            f"All required OpenCUA special tokens validated "
+            f"({len(special_tokens_to_check)} tokens)"
+        )
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
@@ -1149,6 +1190,15 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "video": hf_config.video_token_id,
         }
         
+        # CRITICAL: Verify processor is using media_placeholder (not image_pad)
+        if hf_processor.image_token != "<|media_placeholder|>":
+            raise ValueError(
+                f"processor.image_token must be '<|media_placeholder|>', "
+                f"but got '{hf_processor.image_token}'. "
+                f"This will break text recognition. "
+                f"Please ensure OpenCUA processor is correctly configured."
+            )
+        
         # Get token IDs from vocab, with fallback to encoding if not found
         try:
             placeholder = {
@@ -1171,6 +1221,14 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"processor.image_token={hf_processor.image_token} not in vocab, "
                 f"using encoded token ID: {placeholder['image']}"
             )
+        
+        # Verify placeholder token ID matches config
+        if placeholder["image"] != replacement_token_id["image"]:
+            logger.warning(
+                f"Placeholder token ID ({placeholder['image']}) "
+                f"does not match config image_token_id ({replacement_token_id['image']}). "
+                f"Using placeholder token ID."
+            )
 
         merge_length = image_processor.merge_size**2
 
@@ -1180,6 +1238,24 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
+            
+            # CRITICAL: Verify placeholder count matches visual token count
+            # This ensures proper text recognition
+            if num_tokens <= 0:
+                raise ValueError(
+                    f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
+                    f"(grid_thw={grid_thw.tolist()}, merge_length={merge_length}). "
+                    f"This will break text recognition. "
+                    f"Check image processing configuration."
+                )
+            
+            # Log for debugging (can be removed later)
+            logger.debug(
+                f"{modality} item {item_idx}: "
+                f"grid_thw={grid_thw.tolist()}, "
+                f"visual_tokens={num_tokens}, "
+                f"merge_length={merge_length}"
+            )
 
             return [replacement_token_id[modality]] * num_tokens
 
