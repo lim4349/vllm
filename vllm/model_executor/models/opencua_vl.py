@@ -941,9 +941,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return self._cached_processor
         
         # Use OpenCUA's original processor, tokenizer, and chat_template
-        processor = self.ctx.get_hf_processor(
-            Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
+        model_path = self.ctx.model_config.model
+        use_fast = kwargs.pop("use_fast", True)
+        
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            use_fast=use_fast,
             **kwargs,
         )
         
