@@ -1035,18 +1035,18 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # This ensures we use the correct token ID that matches the tokenizer
         media_placeholder_id = vocab["<|media_placeholder|>"]
         
-        # CRITICAL: Sync config image_token_id with actual <|media_placeholder|> token ID
-        # This ensures placeholder matching works correctly for text recognition
-        if hasattr(hf_config, "image_token_id") and hf_config.image_token_id != media_placeholder_id:
-            logger.warning(
-                f"Config image_token_id ({hf_config.image_token_id}) does not match "
-                f"actual <|media_placeholder|> token ID ({media_placeholder_id}). "
-                f"Updating config to use actual token ID."
-            )
-            # Update config to use actual token ID
+        # CRITICAL: 모델 config 동기화 - 항상 토크나이저에서 실제 ID를 조회해서 config를 덮어쓰기
+        # 런타임에서 업데이트하므로 엔진 재기동 시에도 올바른 ID가 사용됨
+        if hasattr(hf_config, "image_token_id"):
+            if hf_config.image_token_id != media_placeholder_id:
+                logger.warning(
+                    f"Config image_token_id ({hf_config.image_token_id}) != "
+                    f"actual <|media_placeholder|> ({media_placeholder_id}). "
+                    f"Updating config."
+                )
+            # 항상 실제 token ID로 덮어쓰기
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
-                # Video token may also use the same placeholder
                 hf_config.video_token_id = media_placeholder_id
         
         # Use the actual token ID (from vocab, not from config)
@@ -1120,44 +1120,39 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             processor.chat_template = chat_template
             logger.info("Set OpenCUA chat_template to processor")
         
-        # Validate special tokens exist in tokenizer and are NOT UNK
-        # CRITICAL: All these tokens must exist and not be UNK for proper text recognition
-        special_tokens_to_check = [
-            "<|im_user|>", "<|im_assistant|>", "<|im_end|>",
-            "<|media_begin|>", "<|media_content|>", 
-            "<|media_placeholder|>", "<|media_end|>"
-        ]
+        # CRITICAL: ID 고정 검증 (시작 시 1회 assertion)
+        # 모든 special tokens가 UNK가 아니고 값이 기대와 일치해야 함
+        im_tokens = ["<|im_user|>", "<|im_assistant|>", "<|im_end|>"]
+        media_tokens = ["<|media_begin|>", "<|media_content|>", "<|media_end|>", "<|media_placeholder|>"]
+        all_required_tokens = im_tokens + media_tokens
         
         unk_token_id = opencua_tokenizer.unk_token_id if hasattr(opencua_tokenizer, "unk_token_id") else None
         
-        missing_tokens = []
-        unk_tokens = []
-        for token_str in special_tokens_to_check:
-            if token_str not in vocab:
-                missing_tokens.append(token_str)
-            else:
-                token_id = vocab[token_str]
-                if unk_token_id is not None and token_id == unk_token_id:
-                    unk_tokens.append(f"{token_str} (id={token_id})")
-                else:
-                    logger.debug(f"Validated token: {token_str} -> {token_id}")
-        
-        if missing_tokens:
-            raise ValueError(
-                f"Missing required OpenCUA special tokens: {missing_tokens}. "
+        # Assertion: 모든 토큰이 vocab에 있고 UNK가 아님
+        for token_str in all_required_tokens:
+            assert token_str in vocab, (
+                f"Missing required token: {token_str}. "
                 f"This will break text recognition."
             )
+            token_id = vocab[token_str]
+            if unk_token_id is not None:
+                assert token_id != unk_token_id, (
+                    f"Token {token_str} mapped to UNK (id={token_id}). "
+                    f"This will break text recognition."
+                )
         
-        if unk_tokens:
-            raise ValueError(
-                f"OpenCUA special tokens mapped to UNK: {unk_tokens}. "
-                f"This will break text recognition. "
-                f"unk_token_id={unk_token_id}"
-            )
+        # Assertion: processor.image_token_id == tokenizer의 실제 <|media_placeholder|> ID
+        actual_media_placeholder_id = opencua_tokenizer.convert_tokens_to_ids("<|media_placeholder|>")
+        assert actual_media_placeholder_id == media_placeholder_id, (
+            f"processor.image_token_id mismatch: "
+            f"vocab={media_placeholder_id}, "
+            f"convert_tokens_to_ids={actual_media_placeholder_id}"
+        )
         
         logger.info(
             f"All required OpenCUA special tokens validated "
-            f"({len(special_tokens_to_check)} tokens)"
+            f"(im: {len(im_tokens)}, media: {len(media_tokens)}, "
+            f"total: {len(all_required_tokens)})"
         )
         
         # Cache the processor to avoid reloading
@@ -1212,15 +1207,15 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # Get config for consistency check
         hf_config = self.info.get_hf_config()
         
-        # CRITICAL: Ensure config matches actual token ID
-        # This ensures placeholder matching works correctly
-        if hasattr(hf_config, "image_token_id") and hf_config.image_token_id != media_placeholder_id:
-            logger.warning(
-                f"Config image_token_id ({hf_config.image_token_id}) does not match "
-                f"actual <|media_placeholder|> token ID ({media_placeholder_id}). "
-                f"Using actual token ID from vocab."
-            )
-            # Update config to use actual token ID
+        # CRITICAL: 모델 config 동기화 - 항상 토크나이저에서 실제 ID를 조회해서 config를 덮어쓰기
+        if hasattr(hf_config, "image_token_id"):
+            if hf_config.image_token_id != media_placeholder_id:
+                logger.warning(
+                    f"Config image_token_id ({hf_config.image_token_id}) != "
+                    f"actual <|media_placeholder|> ({media_placeholder_id}). "
+                    f"Updating config."
+                )
+            # 항상 실제 token ID로 덮어쓰기
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
@@ -1248,19 +1243,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
+            # CRITICAL: placeholder ↔ grid 일치 assertion
+            # grid_thw로 계산된 visual token 수 (t×h×w // merge_length)
             num_tokens = int(grid_thw.prod()) // merge_length
             
-            # CRITICAL: Verify placeholder count matches visual token count
-            # This ensures proper text recognition
-            if num_tokens <= 0:
-                raise ValueError(
-                    f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
-                    f"(grid_thw={grid_thw.tolist()}, merge_length={merge_length}). "
-                    f"This will break text recognition. "
-                    f"Check image processing configuration."
-                )
+            # Assertion: visual token 수가 0보다 커야 함
+            assert num_tokens > 0, (
+                f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
+                f"(grid_thw={grid_thw.tolist()}, merge_length={merge_length}). "
+                f"This will break text recognition. "
+                f"Check image processing configuration."
+            )
             
-            # Log for debugging (can be removed later)
             logger.debug(
                 f"{modality} item {item_idx}: "
                 f"grid_thw={grid_thw.tolist()}, "
