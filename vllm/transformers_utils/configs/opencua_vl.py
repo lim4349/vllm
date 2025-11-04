@@ -36,10 +36,13 @@ class OpenCUA_VLConfig(Qwen2_5_VLConfig):
         self,
         vision_config: dict | Qwen2_5_VLVisionConfig | None = None,
         text_config: dict | None = None,
-        # Kimi-VL specific tokenizer settings
+        # OpenCUA specific tokenizer settings
+        # CRITICAL: image_token_id는 <|media_placeholder|>의 실제 token ID여야 함
+        # OpenCUA tokenizer에서 <|media_placeholder|> = 151664, EOS = 151644
+        # 기본값을 EOS(151644)로 설정하면 치명적 오류 발생
         media_placeholder_token_id: int = 163605,
-        image_token_id: int = 151644,
-        video_token_id: int = 151645,
+        image_token_id: int = 151664,  # 실제 <|media_placeholder|> token ID
+        video_token_id: int = 151664,  # OpenCUA는 image/video 동일 토큰 사용
         vision_start_token_id: int = 151646,
         vision_end_token_id: int = 151647,
         # Use 1D RoPE instead of M-RoPE
