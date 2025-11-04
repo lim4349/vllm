@@ -940,14 +940,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if self._cached_processor is not None:
             return self._cached_processor
         
-        from transformers import AutoTokenizer
+        from transformers import AutoImageProcessor, AutoTokenizer
         
-        # OpenCUA model may not have processor, so load Qwen2.5-VL processor explicitly
-        # and use OpenCUA model path for image processor config
+        # OpenCUA model path - use OpenCUA's own preprocessor/tokenizer
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
         
-        # Determine base Qwen2.5-VL model based on OpenCUA model size
+        # Determine base Qwen2.5-VL model based on OpenCUA model size (for processor fallback)
         if "7B" in model_path or "7b" in model_path:
             qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         elif "3B" in model_path or "3b" in model_path:
@@ -955,7 +954,24 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
         
-        # Load Qwen2.5-VL processor (has min_pixels attribute)
+        # Priority 1: Try to load image processor from OpenCUA model path
+        opencua_image_processor = None
+        try:
+            opencua_image_processor = AutoImageProcessor.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                **kwargs,
+            )
+            logger.info(
+                f"Loaded OpenCUA image processor from: {model_path}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to load OpenCUA image processor from {model_path}: {e}. "
+                f"Will use Qwen2.5-VL processor."
+            )
+        
+        # Load Qwen2.5-VL processor (has min_pixels attribute required by vLLM)
         processor = Qwen2_5_VLProcessor.from_pretrained(
             qwen2_vl_base,
             trust_remote_code=True,
@@ -963,49 +979,57 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
         
-        # Load image processor from OpenCUA model path if it exists
-        try:
-            from transformers import AutoImageProcessor
-            opencua_image_processor = AutoImageProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                **kwargs,
-            )
-            if hasattr(opencua_image_processor, "min_pixels"):
-                processor.image_processor = opencua_image_processor
-        except Exception:
-            # Use Qwen2.5-VL image processor if OpenCUA image processor not available
-            pass
+        # Replace image processor with OpenCUA's if available
+        if opencua_image_processor is not None and hasattr(opencua_image_processor, "min_pixels"):
+            processor.image_processor = opencua_image_processor
         
-        # Use OpenCUA's original tokenizer and chat template
-        # Processor already has tokenizer from Qwen2.5-VL, but we want OpenCUA's tokenizer
-        # Load OpenCUA tokenizer
+        # Load OpenCUA tokenizer (highest priority)
         opencua_tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,
             use_fast=use_fast,
         )
+        logger.info(
+            f"Loaded OpenCUA tokenizer from: {model_path}, "
+            f"tokenizer type: {type(opencua_tokenizer).__name__}"
+        )
         
         # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = opencua_tokenizer
         
-        # Set processor.image_token and processor.video_token to match OpenCUA tokenizer vocab
-        # This is required for _check_special_mm_tokens validation to pass
-        # Qwen2VLDummyInputsBuilder uses processor.image_token to generate dummy text
+        # Get OpenCUA config for token IDs
         hf_config = self.get_hf_config()
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         
-        # Convert OpenCUA token IDs to token strings using OpenCUA tokenizer
+        # Set processor.image_token and processor.video_token to OpenCUA tokens
+        # OpenCUA uses <|media_placeholder|> scheme instead of <|image_pad|>
         vocab = opencua_tokenizer.get_vocab()
+        
+        # Convert token IDs to token strings
         image_token_str = opencua_tokenizer.convert_ids_to_tokens([image_token_id])[0]
         video_token_str = opencua_tokenizer.convert_ids_to_tokens([video_token_id])[0]
         
-        # Set processor tokens if they exist in vocab
-        if image_token_str in vocab:
+        # Set processor tokens - prefer OpenCUA media tokens if available
+        if "<|media_placeholder|>" in vocab:
+            processor.image_token = "<|media_placeholder|>"
+            processor.video_token = "<|media_placeholder|>"  # OpenCUA may use same token
+            logger.info("Set processor tokens to OpenCUA media tokens")
+        elif image_token_str in vocab:
             processor.image_token = image_token_str
-        if video_token_str in vocab:
-            processor.video_token = video_token_str
+            if video_token_str in vocab:
+                processor.video_token = video_token_str
+            logger.info(f"Set processor tokens from OpenCUA tokenizer: {image_token_str}")
+        else:
+            # Fallback: use tokenizer's special tokens
+            if hasattr(opencua_tokenizer, "special_tokens_map"):
+                special_tokens = opencua_tokenizer.special_tokens_map
+                if "additional_special_tokens" in special_tokens:
+                    for token in special_tokens["additional_special_tokens"]:
+                        if "media" in token.lower() or "placeholder" in token.lower():
+                            processor.image_token = token
+                            logger.info(f"Set processor.image_token to {token} from special tokens")
+                            break
         
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
@@ -1013,7 +1037,14 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             if modalities is None:
                 modalities = ["image", "video"]
             
-            input_ids_list = text_inputs["input_ids"].tolist()[0]
+            # Get input_ids tensor/list
+            input_ids = text_inputs["input_ids"]
+            if hasattr(input_ids, "tolist"):
+                input_ids_list = input_ids.tolist()
+                if isinstance(input_ids_list[0], list):
+                    input_ids_list = input_ids_list[0]
+            else:
+                input_ids_list = input_ids
             
             for modality in modalities:
                 if modality == "image":
@@ -1050,6 +1081,19 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         if chat_template:
             processor.chat_template = chat_template
             logger.info("Set OpenCUA chat_template to processor")
+        
+        # Validate special tokens exist in tokenizer
+        special_tokens_to_check = [
+            "<|media_placeholder|>", "<|media_begin|>", "<|media_end|>",
+            "<|media_content|>", "<|im_user|>", "<|im_assistant|>", "<|im_end|>"
+        ]
+        for token_str in special_tokens_to_check:
+            if token_str in vocab:
+                token_id = vocab[token_str]
+                assert token_id != opencua_tokenizer.unk_token_id, (
+                    f"{token_str} found but has unk_token_id: {token_id}"
+                )
+                logger.debug(f"Validated token: {token_str} -> {token_id}")
         
         # Cache the processor to avoid reloading
         self._cached_processor = processor
