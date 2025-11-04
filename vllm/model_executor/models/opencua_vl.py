@@ -777,11 +777,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         # 최종 shape: [actual_seq_len, head_dim // 2]
         
         # CRITICAL: cu_seqlens_1d는 Qwen2.5-VL의 cu_seqlens_thw와 동일한 형식이어야 함
-        # Qwen2.5-VL은 각 이미지/프레임별로 h*w를 반복함
-        # 1D RoPE에서는 각 프레임별로 llm_h * llm_w를 반복 (merge 전 토큰 수)
-        per_frame_tokens = llm_grid_h * llm_grid_w
+        # Qwen2.5-VL은 각 이미지/프레임별로 h*w를 반복함 (patch embedding 후 merge 전 토큰 수)
+        # 1D RoPE에서도 동일하게 h*w를 반복해야 함
         cu_seqlens_1d = torch.repeat_interleave(
-            torch.tensor([per_frame_tokens], dtype=torch.int32), t
+            torch.tensor([h * w], dtype=torch.int32), t
         )
         
         return (
