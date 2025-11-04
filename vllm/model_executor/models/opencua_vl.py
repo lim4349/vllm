@@ -985,8 +985,19 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     logger.info("Added min_pixels to OpenCUA image processor from Qwen2.5-VL")
             if not hasattr(opencua_image_processor, "max_pixels"):
                 if hasattr(qwen_image_processor, "max_pixels"):
+                    # For better text recognition, use higher max_pixels if available
+                    # This allows the model to process images at higher resolution
                     opencua_image_processor.max_pixels = qwen_image_processor.max_pixels
-                    logger.info("Added max_pixels to OpenCUA image processor from Qwen2.5-VL")
+                    logger.info(
+                        f"Added max_pixels to OpenCUA image processor: {qwen_image_processor.max_pixels}"
+                    )
+            # Log the actual pixel limits for debugging
+            if hasattr(opencua_image_processor, "min_pixels") and hasattr(opencua_image_processor, "max_pixels"):
+                logger.info(
+                    f"OpenCUA image processor pixel limits: "
+                    f"min={opencua_image_processor.min_pixels}, "
+                    f"max={opencua_image_processor.max_pixels}"
+                )
             processor.image_processor = opencua_image_processor
             logger.info("Replaced processor image_processor with OpenCUA image processor")
         
