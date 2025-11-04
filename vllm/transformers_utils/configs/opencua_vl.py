@@ -36,15 +36,17 @@ class OpenCUA_VLConfig(Qwen2_5_VLConfig):
         self,
         vision_config: dict | Qwen2_5_VLVisionConfig | None = None,
         text_config: dict | None = None,
-        # OpenCUA specific tokenizer settings
-        # CRITICAL: image_token_id는 <|media_placeholder|>의 실제 token ID여야 함
-        # OpenCUA tokenizer에서 <|media_placeholder|> = 151664, EOS = 151644
-        # 기본값을 EOS(151644)로 설정하면 치명적 오류 발생
-        media_placeholder_token_id: int = 163605,
-        image_token_id: int = 151664,  # 실제 <|media_placeholder|> token ID
+        # OpenCUA tokenizer settings (from tokenizer_config.json)
+        # CRITICAL: 실제 OpenCUA-7B tokenizer_config.json에서 확인된 값 사용
+        # 151644 = [EOS] (EOS token)
+        # 151664 = <|media_placeholder|> (실제 image/video placeholder)
+        # 151661 = <|media_begin|>
+        # 151663 = <|media_end|>
+        media_placeholder_token_id: int = 151664,  # <|media_placeholder|>
+        image_token_id: int = 151664,  # <|media_placeholder|> (EOS와 다름!)
         video_token_id: int = 151664,  # OpenCUA는 image/video 동일 토큰 사용
-        vision_start_token_id: int = 151646,
-        vision_end_token_id: int = 151647,
+        vision_start_token_id: int = 151661,  # <|media_begin|>
+        vision_end_token_id: int = 151663,  # <|media_end|>
         # Use 1D RoPE instead of M-RoPE
         use_1d_rope: bool = True,
         **kwargs,
