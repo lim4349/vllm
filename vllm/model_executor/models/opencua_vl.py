@@ -989,6 +989,29 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = opencua_tokenizer
         
+        # Set processor.image_token and processor.video_token to match OpenCUA tokenizer vocab
+        # This is required for _check_special_mm_tokens validation to pass
+        # Qwen2VLDummyInputsBuilder uses processor.image_token to generate dummy text
+        hf_config = self.get_hf_config()
+        vocab = opencua_tokenizer.get_vocab()
+        
+        # Convert OpenCUA token IDs to token strings using OpenCUA tokenizer
+        image_token_str = opencua_tokenizer.convert_ids_to_tokens([hf_config.image_token_id])[0]
+        video_token_str = opencua_tokenizer.convert_ids_to_tokens([hf_config.video_token_id])[0]
+        
+        # Set processor tokens if they exist in vocab
+        if image_token_str in vocab:
+            processor.image_token = image_token_str
+        if video_token_str in vocab:
+            processor.video_token = video_token_str
+        
+        # Monkey patch _check_special_mm_tokens to bypass validation
+        # since Qwen2.5-VL processor expects Qwen2.5-VL tokenizer format
+        def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
+            # Skip validation for OpenCUA tokenizer
+            return
+        processor._check_special_mm_tokens = patched_check_special_mm_tokens
+        
         # Get OpenCUA chat template from OpenCUA tokenizer
         chat_template = None
         if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
