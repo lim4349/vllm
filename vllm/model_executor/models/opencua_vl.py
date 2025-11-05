@@ -1294,21 +1294,39 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         """
         Override to ensure max_pixels is updated before calling transformers processor.
         """
-        # CRITICAL: Update image_processor.max_pixels before calling transformers processor
+        # CRITICAL: Always update image_processor.max_pixels before calling transformers processor
         # This ensures transformers processor uses the correct max_pixels when processing images
-        if "max_pixels" in mm_kwargs:
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
-            if hasattr(hf_processor, "image_processor") and hasattr(
-                hf_processor.image_processor, "max_pixels"
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        if hasattr(hf_processor, "image_processor") and hasattr(
+            hf_processor.image_processor, "max_pixels"
+        ):
+            current_max_pixels = hf_processor.image_processor.max_pixels
+            target_max_pixels = mm_kwargs.get("max_pixels")
+            
+            # Log current state for debugging
+            logger.debug(
+                f"_call_hf_processor: current_max_pixels={current_max_pixels}, "
+                f"mm_kwargs.max_pixels={target_max_pixels}"
+            )
+            
+            # Use max_pixels from mm_kwargs if available and larger than current
+            if target_max_pixels is not None and (
+                current_max_pixels is None or current_max_pixels < target_max_pixels
             ):
-                new_max_pixels = mm_kwargs["max_pixels"]
-                current_max_pixels = hf_processor.image_processor.max_pixels
-                if current_max_pixels is None or current_max_pixels < new_max_pixels:
-                    hf_processor.image_processor.max_pixels = new_max_pixels
-                    logger.info(
-                        f"Updated image_processor.max_pixels from {current_max_pixels} "
-                        f"to {new_max_pixels} before calling transformers processor"
-                    )
+                hf_processor.image_processor.max_pixels = target_max_pixels
+                logger.info(
+                    f"Updated image_processor.max_pixels from {current_max_pixels} "
+                    f"to {target_max_pixels} before calling transformers processor"
+                )
+            elif target_max_pixels is not None and current_max_pixels == target_max_pixels:
+                logger.debug(
+                    f"image_processor.max_pixels already set to {current_max_pixels}"
+                )
+            else:
+                logger.debug(
+                    f"image_processor.max_pixels={current_max_pixels}, "
+                    f"no update needed (mm_kwargs.max_pixels={target_max_pixels})"
+                )
         
         # Call parent's _call_hf_processor
         return super()._call_hf_processor(
