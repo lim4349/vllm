@@ -1347,23 +1347,53 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # CRITICAL: Ensure max_pixels is passed to transformers processor
         # Transformers processor may not use image_processor.max_pixels attribute
         # Instead, it might need max_pixels as a kwarg
-        updated_mm_kwargs = dict(mm_kwargs)
-        if "max_pixels" not in updated_mm_kwargs:
-            # Use current_max_pixels if available
-            if hasattr(hf_processor, "image_processor") and hasattr(
-                hf_processor.image_processor, "max_pixels"
-            ):
-                updated_mm_kwargs["max_pixels"] = hf_processor.image_processor.max_pixels
-                logger.info(
-                    f"Added max_pixels={updated_mm_kwargs['max_pixels']} to mm_kwargs "
-                    f"for transformers processor"
-                )
+        # However, transformers Qwen2_5_VLProcessor may not accept max_pixels as a kwarg
+        # Instead, it uses image_processor.max_pixels attribute
+        # So we need to ensure image_processor.max_pixels is set correctly
         
-        # Call parent's _call_hf_processor with updated mm_kwargs
+        # Update image_processor.max_pixels if needed
+        if hasattr(hf_processor, "image_processor") and hasattr(
+            hf_processor.image_processor, "max_pixels"
+        ):
+            current_max_pixels = hf_processor.image_processor.max_pixels
+            target_max_pixels = mm_kwargs.get("max_pixels")
+            
+            # Use max_pixels from mm_kwargs if available, otherwise keep current
+            if target_max_pixels is not None and current_max_pixels != target_max_pixels:
+                hf_processor.image_processor.max_pixels = target_max_pixels
+                logger.info(
+                    f"Updated image_processor.max_pixels from {current_max_pixels} "
+                    f"to {target_max_pixels} (from mm_kwargs)"
+                )
+            elif target_max_pixels is None:
+                # Ensure max_pixels is at least the default
+                default_max_pixels = 12845056
+                if current_max_pixels is None or current_max_pixels < default_max_pixels:
+                    hf_processor.image_processor.max_pixels = default_max_pixels
+                    logger.info(
+                        f"Updated image_processor.max_pixels from {current_max_pixels} "
+                        f"to {default_max_pixels} (default)"
+                    )
+        
+        # Log the actual image data size for debugging
+        if "images" in mm_data or "image" in mm_data:
+            image_data = mm_data.get("images") or mm_data.get("image")
+            if image_data is not None:
+                if isinstance(image_data, list) and len(image_data) > 0:
+                    first_image = image_data[0]
+                    if hasattr(first_image, "size"):
+                        logger.info(
+                            f"Input image size before processing: {first_image.size[0]}x{first_image.size[1]} "
+                            f"({first_image.size[0] * first_image.size[1]} pixels)"
+                        )
+        
+        # Call parent's _call_hf_processor
+        # Note: We don't add max_pixels to mm_kwargs here because transformers processor
+        # uses image_processor.max_pixels attribute, not kwargs
         return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=updated_mm_kwargs,
+            mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
     
