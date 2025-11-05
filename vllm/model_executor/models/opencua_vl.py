@@ -9,7 +9,6 @@
 
 """Inference-only OpenCUA-VL model compatible with HuggingFace weights."""
 
-import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -966,8 +965,17 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             return opencua_vl_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # Return cached processor if available
+        # If max_pixels is provided in kwargs, update the cached processor's image_processor
         if self._cached_processor is not None:
+            # If max_pixels is provided in kwargs, update the cached processor's image_processor
+            if "max_pixels" in kwargs and hasattr(self._cached_processor, "image_processor"):
+                current_max = getattr(self._cached_processor.image_processor, "max_pixels", None)
+                new_max = kwargs["max_pixels"]
+                if current_max is None or current_max < new_max:
+                    self._cached_processor.image_processor.max_pixels = new_max
+                    logger.info(
+                        f"Updated cached processor's max_pixels from {current_max} to {new_max}"
+                    )
             return self._cached_processor
         
         from transformers import AutoImageProcessor, AutoTokenizer
@@ -1009,43 +1017,44 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # If OpenCUA image processor doesn't have min_pixels/max_pixels,
             # add them from Qwen2.5-VL processor
             qwen_image_processor = processor.image_processor
+            
+            # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels, 3) OpenCUA's max_pixels
+            target_max_pixels = None
+            if "max_pixels" in kwargs:
+                # Highest priority: use max_pixels from kwargs (e.g., from mm_processor_kwargs)
+                target_max_pixels = kwargs["max_pixels"]
+                logger.info(f"Using max_pixels from kwargs: {target_max_pixels}")
+            elif hasattr(qwen_image_processor, "max_pixels"):
+                # Second priority: use Qwen2.5-VL processor's max_pixels
+                target_max_pixels = qwen_image_processor.max_pixels
+                logger.info(f"Using max_pixels from Qwen2.5-VL processor: {target_max_pixels}")
+            
             if not hasattr(opencua_image_processor, "min_pixels"):
                 if hasattr(qwen_image_processor, "min_pixels"):
                     opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
                     logger.info("Added min_pixels to OpenCUA image processor from Qwen2.5-VL")
-            # CRITICAL: Get default max_pixels from image processor config
-            # Use Qwen2.5-VL processor's max_pixels as default (from config)
-            default_max_pixels = None
-            if hasattr(qwen_image_processor, "max_pixels"):
-                default_max_pixels = qwen_image_processor.max_pixels
-                logger.info(f"Using default max_pixels from Qwen2.5-VL processor: {default_max_pixels}")
             
-            # Allow override via OPENCUA_MAX_PIXELS environment variable
-            if "OPENCUA_MAX_PIXELS" in os.environ:
-                try:
-                    default_max_pixels = int(os.environ["OPENCUA_MAX_PIXELS"])
-                    logger.info(f"Using OPENCUA_MAX_PIXELS from environment: {default_max_pixels}")
-                except ValueError:
-                    logger.warning(f"Invalid OPENCUA_MAX_PIXELS value, using default: {default_max_pixels}")
-            
-            if default_max_pixels is None:
-                # Fallback: use a reasonable default if not found in config
-                default_max_pixels = 30_000_000  # 30M pixels for high-quality text recognition
-                logger.warning(f"max_pixels not found in config, using fallback: {default_max_pixels}")
-            
-            if not hasattr(opencua_image_processor, "max_pixels"):
-                # Use default max_pixels from config
-                opencua_image_processor.max_pixels = default_max_pixels
-                logger.info(f"Set max_pixels to {default_max_pixels} for OpenCUA image processor")
-            else:
-                # Use the higher value between OpenCUA and Qwen2.5-VL configs
-                current_max = opencua_image_processor.max_pixels
-                if default_max_pixels is not None and default_max_pixels > current_max:
-                    opencua_image_processor.max_pixels = default_max_pixels
+            # CRITICAL: Always ensure max_pixels is set to the highest available value
+            if target_max_pixels is not None:
+                if not hasattr(opencua_image_processor, "max_pixels"):
+                    opencua_image_processor.max_pixels = target_max_pixels
                     logger.info(
-                        f"Upgraded max_pixels from {current_max} to {default_max_pixels} "
-                        f"from config for better text recognition"
+                        f"Added max_pixels to OpenCUA image processor: {target_max_pixels}"
                     )
+                else:
+                    # Upgrade if current max_pixels is lower than target
+                    current_max = opencua_image_processor.max_pixels
+                    if current_max < target_max_pixels:
+                        opencua_image_processor.max_pixels = target_max_pixels
+                        logger.info(
+                            f"Upgraded max_pixels from {current_max} to {target_max_pixels} "
+                            f"for better text recognition"
+                        )
+            elif hasattr(opencua_image_processor, "max_pixels"):
+                # If OpenCUA has max_pixels but no target, log it
+                logger.info(
+                    f"Using OpenCUA image processor's max_pixels: {opencua_image_processor.max_pixels}"
+                )
             # Log the actual pixel limits for debugging
             if hasattr(opencua_image_processor, "min_pixels") and hasattr(opencua_image_processor, "max_pixels"):
                 logger.info(
@@ -1204,7 +1213,34 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         
         # Set chat_template to processor
         if chat_template:
-            processor.chat_template = chat_template
+            # Optionally inject system prompt from environment variable
+            import os
+            system_prompt_env = os.getenv("OPENCUA_SYSTEM_PROMPT")
+            if system_prompt_env:
+                # Wrap chat_template to inject system prompt
+                original_template = chat_template
+                
+                def modified_chat_template(messages, tokenizer, **kwargs):
+                    # Check if system message already exists
+                    has_system = messages and messages[0].get("role") == "system"
+                    
+                    if not has_system:
+                        # Prepend system message
+                        messages = [{"role": "system", "content": system_prompt_env}] + messages
+                    
+                    # Use original template
+                    if callable(original_template):
+                        return original_template(messages, tokenizer=tokenizer, **kwargs)
+                    else:
+                        # If it's a string (Jinja template), use tokenizer.apply_chat_template
+                        return tokenizer.apply_chat_template(
+                            messages, tokenizer=tokenizer, chat_template=original_template, **kwargs
+                        )
+                
+                processor.chat_template = modified_chat_template
+                logger.info(f"Injected system prompt from OPENCUA_SYSTEM_PROMPT: {system_prompt_env[:50]}...")
+            else:
+                processor.chat_template = chat_template
             logger.info("Set OpenCUA chat_template to processor")
         
         # CRITICAL: ID 고정 검증 (시작 시 1회 assertion)
