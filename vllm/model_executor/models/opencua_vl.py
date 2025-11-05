@@ -1296,37 +1296,53 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         """
         # CRITICAL: Always update image_processor.max_pixels before calling transformers processor
         # This ensures transformers processor uses the correct max_pixels when processing images
+        logger.info(
+            f"_call_hf_processor called with mm_kwargs keys: {list(mm_kwargs.keys())}"
+        )
+        
+        # Get processor - this may return cached processor
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        
         if hasattr(hf_processor, "image_processor") and hasattr(
             hf_processor.image_processor, "max_pixels"
         ):
             current_max_pixels = hf_processor.image_processor.max_pixels
             target_max_pixels = mm_kwargs.get("max_pixels")
             
-            # Log current state for debugging
-            logger.debug(
+            # Log current state for debugging (use INFO to ensure it's visible)
+            logger.info(
                 f"_call_hf_processor: current_max_pixels={current_max_pixels}, "
                 f"mm_kwargs.max_pixels={target_max_pixels}"
             )
             
-            # Use max_pixels from mm_kwargs if available and larger than current
-            if target_max_pixels is not None and (
-                current_max_pixels is None or current_max_pixels < target_max_pixels
-            ):
-                hf_processor.image_processor.max_pixels = target_max_pixels
-                logger.info(
-                    f"Updated image_processor.max_pixels from {current_max_pixels} "
-                    f"to {target_max_pixels} before calling transformers processor"
-                )
-            elif target_max_pixels is not None and current_max_pixels == target_max_pixels:
-                logger.debug(
-                    f"image_processor.max_pixels already set to {current_max_pixels}"
-                )
+            # CRITICAL: Always ensure max_pixels is set correctly
+            # If mm_kwargs has max_pixels, use it (even if smaller, to allow user override)
+            # Otherwise, ensure current_max_pixels is at least the default (12845056)
+            if target_max_pixels is not None:
+                # User explicitly provided max_pixels - use it
+                if current_max_pixels != target_max_pixels:
+                    hf_processor.image_processor.max_pixels = target_max_pixels
+                    logger.info(
+                        f"Updated image_processor.max_pixels from {current_max_pixels} "
+                        f"to {target_max_pixels} (from mm_kwargs)"
+                    )
+                else:
+                    logger.debug(
+                        f"image_processor.max_pixels already set to {current_max_pixels}"
+                    )
             else:
-                logger.debug(
-                    f"image_processor.max_pixels={current_max_pixels}, "
-                    f"no update needed (mm_kwargs.max_pixels={target_max_pixels})"
-                )
+                # No max_pixels in mm_kwargs - ensure it's at least the default
+                default_max_pixels = 12845056  # From Qwen2.5-VL processor
+                if current_max_pixels is None or current_max_pixels < default_max_pixels:
+                    hf_processor.image_processor.max_pixels = default_max_pixels
+                    logger.info(
+                        f"Updated image_processor.max_pixels from {current_max_pixels} "
+                        f"to {default_max_pixels} (default)"
+                    )
+                else:
+                    logger.debug(
+                        f"image_processor.max_pixels={current_max_pixels} (no update needed)"
+                    )
         
         # Call parent's _call_hf_processor
         return super()._call_hf_processor(
@@ -1442,14 +1458,30 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             )
             
             # CRITICAL: 디버깅을 위한 상세 로깅
+            # Also log the actual image size in pixels for debugging
+            patch_size = hf_config.vision_config.patch_size
+            actual_height_px = grid_h * patch_size
+            actual_width_px = grid_w * patch_size
+            actual_pixels = actual_height_px * actual_width_px
+            
             logger.info(
                 f"{modality.upper()} item {item_idx} replacement: "
                 f"grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
                 f"total_patches={total_patches}, "
                 f"merge_length={merge_length}, "
                 f"num_visual_tokens={num_tokens}, "
-                f"replacement_token_id={replacement_token_id[modality]}"
+                f"replacement_token_id={replacement_token_id[modality]}, "
+                f"actual_size_px={actual_height_px}x{actual_width_px} ({actual_pixels} pixels)"
             )
+            
+            # CRITICAL: Warn if image is too small for text recognition
+            if actual_pixels < 100000:  # Less than ~316x316 pixels
+                logger.warning(
+                    f"{modality.upper()} item {item_idx} is too small for text recognition: "
+                    f"{actual_height_px}x{actual_width_px} pixels. "
+                    f"Expected at least 100000 pixels for good text recognition. "
+                    f"Current max_pixels={image_processor.max_pixels}"
+                )
 
             return [replacement_token_id[modality]] * num_tokens
 
