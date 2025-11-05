@@ -1461,6 +1461,7 @@ class OpenCUA_VLForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    _supports_sdpa = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
