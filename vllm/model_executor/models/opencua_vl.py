@@ -1293,11 +1293,52 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> BatchFeature:
         """
         Call the HF processor on the prompt text and associated multi-modal data.
+        
+        CRITICAL: Qwen2_5_VLProcessor expects max_pixels in images_kwargs structure,
+        not as a direct kwarg. We need to ensure max_pixels is passed correctly.
         """
+        # Get processor to access image_processor.max_pixels
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        
+        # CRITICAL: Qwen2_5_VLProcessor uses images_kwargs structure for max_pixels
+        # Transformers processor expects: images_kwargs={"max_pixels": ...}
+        # Not: max_pixels=...
+        updated_mm_kwargs = dict(mm_kwargs)
+        
+        # If max_pixels is in mm_kwargs, restructure it to images_kwargs
+        if "max_pixels" in updated_mm_kwargs:
+            max_pixels_value = updated_mm_kwargs.pop("max_pixels")
+            # Ensure images_kwargs dict exists
+            if "images_kwargs" not in updated_mm_kwargs:
+                updated_mm_kwargs["images_kwargs"] = {}
+            if not isinstance(updated_mm_kwargs["images_kwargs"], dict):
+                updated_mm_kwargs["images_kwargs"] = dict(updated_mm_kwargs["images_kwargs"])
+            updated_mm_kwargs["images_kwargs"]["max_pixels"] = max_pixels_value
+            logger.info(
+                f"Restructured max_pixels={max_pixels_value} into images_kwargs for Qwen2_5_VLProcessor"
+            )
+        elif hasattr(hf_processor, "image_processor") and hasattr(
+            hf_processor.image_processor, "max_pixels"
+        ):
+            # If max_pixels is not in mm_kwargs, ensure it's passed from image_processor
+            max_pixels_value = hf_processor.image_processor.max_pixels
+            if max_pixels_value is not None:
+                # Ensure images_kwargs dict exists
+                if "images_kwargs" not in updated_mm_kwargs:
+                    updated_mm_kwargs["images_kwargs"] = {}
+                if not isinstance(updated_mm_kwargs["images_kwargs"], dict):
+                    updated_mm_kwargs["images_kwargs"] = dict(updated_mm_kwargs["images_kwargs"])
+                # Only set if not already present
+                if "max_pixels" not in updated_mm_kwargs["images_kwargs"]:
+                    updated_mm_kwargs["images_kwargs"]["max_pixels"] = max_pixels_value
+                    logger.info(
+                        f"Added max_pixels={max_pixels_value} from image_processor to images_kwargs"
+                    )
+        
         return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs=updated_mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
     
