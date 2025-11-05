@@ -1510,8 +1510,18 @@ class OpenCUA_VLForConditionalGeneration(
                 k: v for k, v in config.to_dict().items()
                 if k not in ["vision_config", "model_type", "media_placeholder_token_id",
                              "image_token_id", "video_token_id", "vision_start_token_id",
-                             "vision_end_token_id", "use_1d_rope"]
+                             "vision_end_token_id", "use_1d_rope", "rope_scaling"]
             }
+            # CRITICAL: OpenCUA uses 1D RoPE, so disable rope_scaling to prevent
+            # automatic scaling that could interfere with 1D RoPE behavior
+            original_rope_scaling = text_config_dict.get("rope_scaling", None)
+            if "rope_scaling" in text_config_dict:
+                text_config_dict["rope_scaling"] = None
+            if original_rope_scaling is not None:
+                logger.info(
+                    f"OpenCUA: Disabled rope_scaling ({original_rope_scaling}) "
+                    f"for text_config to ensure 1D RoPE compatibility"
+                )
             text_config = Qwen2Config(**text_config_dict)
         
         self.language_model = init_vllm_registered_model(
