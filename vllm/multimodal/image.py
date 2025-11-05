@@ -86,13 +86,6 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_bytes(self, data: bytes) -> Image.Image:
         image = Image.open(BytesIO(data))
         image.load()
-        # CRITICAL: Log image size right after loading from bytes
-        from vllm.logger import init_logger
-        logger = init_logger(__name__)
-        logger.info(
-            f"ImageMediaIO.load_bytes: loaded image size: {image.size[0]}x{image.size[1]} "
-            f"({image.size[0] * image.size[1]} pixels)"
-        )
         return self._convert_image_mode(image)
 
     def load_base64(self, media_type: str, data: str) -> Image.Image:

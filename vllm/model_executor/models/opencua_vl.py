@@ -1294,25 +1294,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         """
         Call the HF processor on the prompt text and associated multi-modal data.
         """
-        # CRITICAL: Log original image sizes BEFORE processing
-        if "images" in mm_data and mm_data["images"]:
-            images = mm_data["images"]
-            if not isinstance(images, list):
-                images = [images]
-            for idx, img in enumerate(images):
-                if img is not None:
-                    try:
-                        from PIL import Image as PILImage
-                        if isinstance(img, PILImage.Image):
-                            orig_w, orig_h = img.size
-                            orig_pixels = orig_w * orig_h
-                            logger.info(
-                                f"Original image {idx} size BEFORE transformers processor: "
-                                f"{orig_w}x{orig_h} ({orig_pixels} pixels)"
-                            )
-                    except Exception:
-                        pass
-        
         return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -1425,31 +1406,14 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"Check image processing configuration."
             )
             
-            # CRITICAL: 디버깅을 위한 상세 로깅
-            # Also log the actual image size in pixels for debugging
-            patch_size = hf_config.vision_config.patch_size
-            actual_height_px = grid_h * patch_size
-            actual_width_px = grid_w * patch_size
-            actual_pixels = actual_height_px * actual_width_px
-            
             logger.info(
                 f"{modality.upper()} item {item_idx} replacement: "
                 f"grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
                 f"total_patches={total_patches}, "
                 f"merge_length={merge_length}, "
                 f"num_visual_tokens={num_tokens}, "
-                f"replacement_token_id={replacement_token_id[modality]}, "
-                f"actual_size_px={actual_height_px}x{actual_width_px} ({actual_pixels} pixels)"
+                f"replacement_token_id={replacement_token_id[modality]}"
             )
-            
-            # CRITICAL: Warn if image is too small for text recognition
-            if actual_pixels < 100000:  # Less than ~316x316 pixels
-                logger.warning(
-                    f"{modality.upper()} item {item_idx} is too small for text recognition: "
-                    f"{actual_height_px}x{actual_width_px} pixels. "
-                    f"Expected at least 100000 pixels for good text recognition. "
-                    f"Current max_pixels={image_processor.max_pixels}"
-                )
 
             return [replacement_token_id[modality]] * num_tokens
 
