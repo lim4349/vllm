@@ -1344,11 +1344,26 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                         f"image_processor.max_pixels={current_max_pixels} (no update needed)"
                     )
         
-        # Call parent's _call_hf_processor
+        # CRITICAL: Ensure max_pixels is passed to transformers processor
+        # Transformers processor may not use image_processor.max_pixels attribute
+        # Instead, it might need max_pixels as a kwarg
+        updated_mm_kwargs = dict(mm_kwargs)
+        if "max_pixels" not in updated_mm_kwargs:
+            # Use current_max_pixels if available
+            if hasattr(hf_processor, "image_processor") and hasattr(
+                hf_processor.image_processor, "max_pixels"
+            ):
+                updated_mm_kwargs["max_pixels"] = hf_processor.image_processor.max_pixels
+                logger.info(
+                    f"Added max_pixels={updated_mm_kwargs['max_pixels']} to mm_kwargs "
+                    f"for transformers processor"
+                )
+        
+        # Call parent's _call_hf_processor with updated mm_kwargs
         return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs=updated_mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
     
