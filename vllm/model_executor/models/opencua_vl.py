@@ -950,19 +950,37 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         # Try to get OpenCUA_VLConfig first
         try:
-            return self.ctx.get_hf_config(OpenCUA_VLConfig)
+            config = self.ctx.get_hf_config(OpenCUA_VLConfig)
         except TypeError:
             # If the loaded config is OpenCUAConfig from the model repository,
-            # convert it to OpenCUA_VLConfig
+            # load it directly and add vLLM-specific attributes if needed
             from transformers import AutoConfig
             model_path = self.ctx.model_config.model
-            original_config = AutoConfig.from_pretrained(
+            config = AutoConfig.from_pretrained(
                 model_path, trust_remote_code=True
             )
-            config_dict = original_config.to_dict()
-            # Convert to OpenCUA_VLConfig
-            opencua_vl_config = OpenCUA_VLConfig.from_dict(config_dict)
-            return opencua_vl_config
+            # If it's already OpenCUAConfig from HF, add vLLM-specific attributes
+            if hasattr(config, "model_type") and config.model_type == "opencua":
+                # Add vLLM-specific attributes if they don't exist
+                if not hasattr(config, "image_token_id"):
+                    config.image_token_id = getattr(
+                        config, "media_placeholder_token_id", 151664
+                    )
+                if not hasattr(config, "video_token_id"):
+                    config.video_token_id = getattr(
+                        config, "media_placeholder_token_id", 151664
+                    )
+                if not hasattr(config, "vision_start_token_id"):
+                    config.vision_start_token_id = 151661
+                if not hasattr(config, "vision_end_token_id"):
+                    config.vision_end_token_id = 151663
+                if not hasattr(config, "use_1d_rope"):
+                    config.use_1d_rope = True
+            else:
+                # Convert to OpenCUA_VLConfig if it's a different config
+                config_dict = config.to_dict()
+                config = OpenCUA_VLConfig.from_dict(config_dict)
+        return config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         # If max_pixels is provided in kwargs, update the cached processor's image_processor
