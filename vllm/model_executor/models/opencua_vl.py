@@ -904,7 +904,26 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
+        # Debug: log before merger
+        logger.warning(
+            "OpenCUA before merger: shape=%s, dtype=%s, mean=%.6f, std=%.6f",
+            hidden_states.shape,
+            hidden_states.dtype,
+            hidden_states.mean().item(),
+            hidden_states.std().item(),
+        )
         hidden_states = self.merger(hidden_states)
+        # Debug: log after merger
+        logger.warning(
+            "OpenCUA after merger: shape=%s, dtype=%s, "
+            "mean=%.6f, std=%.6f, "
+            "expected_lm_hidden_size=%s",
+            hidden_states.shape,
+            hidden_states.dtype,
+            hidden_states.mean().item(),
+            hidden_states.std().item(),
+            getattr(self, "_lm_hidden_size", "unknown"),
+        )
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
@@ -1475,6 +1494,28 @@ class OpenCUA_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
+            # Store language model hidden_size for debugging
+            text_config = getattr(config, "text_config", None)
+            if text_config is None:
+                text_config_dict = {
+                    k: v
+                    for k, v in config.to_dict().items()
+                    if k
+                    not in [
+                        "vision_config",
+                        "model_type",
+                        "media_placeholder_token_id",
+                        "image_token_id",
+                        "video_token_id",
+                        "vision_start_token_id",
+                        "vision_end_token_id",
+                        "use_1d_rope",
+                    ]
+                }
+                from transformers.models.qwen2 import Qwen2Config
+
+                text_config = Qwen2Config(**text_config_dict)
+            self.visual._lm_hidden_size = text_config.hidden_size
         else:
             self.visual = None
 
