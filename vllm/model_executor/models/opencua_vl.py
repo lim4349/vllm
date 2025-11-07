@@ -1493,6 +1493,10 @@ class OpenCUA_VLForConditionalGeneration(
                     "use_1d_rope",
                 ]
             }
+            # OpenCUA uses 1D RoPE, not M-RoPE
+            # Remove rope_scaling to prevent vLLM from detecting M-RoPE
+            if "rope_scaling" in text_config_dict:
+                text_config_dict.pop("rope_scaling")
             text_config = Qwen2Config(**text_config_dict)
 
         self.language_model = init_vllm_registered_model(
