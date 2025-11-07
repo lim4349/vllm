@@ -1876,16 +1876,23 @@ class OpenCUA_VLForConditionalGeneration(
                 h // spatial_merge_size,
                 w // spatial_merge_size,
             )
+            # text_len includes text tokens from st to ed
+            # (ed is <|media_placeholder|> position)
+            # In input_tokens, ed points to <|media_placeholder|> token,
+            # which will be replaced by num_visual_tokens visual embeddings
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
             # Text tokens: 1D sequential positions
+            # Note: text_len includes the <|media_placeholder|> token position,
+            # but we assign positions to text tokens only (excluding the placeholder)
             text_positions = torch.arange(text_len) + st_idx
             llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
 
             # Visual tokens: 1D sequential positions (all dimensions same)
+            # Position starts after text tokens (including the placeholder position)
             visual_positions = torch.arange(num_visual_tokens) + text_len + st_idx
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
 
