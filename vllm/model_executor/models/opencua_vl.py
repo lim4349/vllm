@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 # Import Qwen2.5-VL components dynamically to avoid import issues
 try:
@@ -83,6 +83,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsMultiModal,
     SupportsMultiModalPruning,
     SupportsPP,
@@ -907,26 +908,7 @@ class OpenCUA_VisionTransformer(nn.Module):
         # Remove the extra dimension before merger
         # hidden_states shape: [seq_len, 1, context_dim] -> [seq_len, context_dim]
         hidden_states = hidden_states.squeeze(1)
-        # Debug: log before merger
-        logger.warning(
-            "OpenCUA before merger: shape=%s, dtype=%s, mean=%.6f, std=%.6f",
-            hidden_states.shape,
-            hidden_states.dtype,
-            hidden_states.mean().item(),
-            hidden_states.std().item(),
-        )
         hidden_states = self.merger(hidden_states)
-        # Debug: log after merger
-        logger.warning(
-            "OpenCUA after merger: shape=%s, dtype=%s, "
-            "mean=%.6f, std=%.6f, "
-            "expected_lm_hidden_size=%s",
-            hidden_states.shape,
-            hidden_states.dtype,
-            hidden_states.mean().item(),
-            hidden_states.std().item(),
-            getattr(self, "_lm_hidden_size", "unknown"),
-        )
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
@@ -1441,6 +1423,7 @@ class OpenCUA_VLForConditionalGeneration(
     SupportsQuant,
     SupportsEagle3,
     SupportsMultiModalPruning,
+    SupportsMRoPE,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1545,10 +1528,11 @@ class OpenCUA_VLForConditionalGeneration(
                     "use_1d_rope",
                 ]
             }
-            # OpenCUA uses 1D RoPE, not M-RoPE
-            # Remove rope_scaling to prevent vLLM from detecting M-RoPE
-            if "rope_scaling" in text_config_dict:
-                text_config_dict.pop("rope_scaling")
+            # OpenCUA uses 1D RoPE, but implements SupportsMRoPE interface
+            # Set rope_scaling to enable M-RoPE position calculation
+            # (get_mrope_input_positions will use 1D sequential positions)
+            if "rope_scaling" not in text_config_dict:
+                text_config_dict["rope_scaling"] = {"type": "mrope_section"}
             text_config = Qwen2Config(**text_config_dict)
 
         self.language_model = init_vllm_registered_model(
@@ -1684,19 +1668,6 @@ class OpenCUA_VLForConditionalGeneration(
                     )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
-                    # Debug: log vision transformer output
-                    logger.warning(
-                        "OpenCUA vision output: shape=%s, dtype=%s, "
-                        "mean=%.6f, std=%.6f, min=%.6f, max=%.6f, "
-                        "first_5_values=%s",
-                        image_embeds.shape,
-                        image_embeds.dtype,
-                        image_embeds.mean().item(),
-                        image_embeds.std().item(),
-                        image_embeds.min().item(),
-                        image_embeds.max().item(),
-                        image_embeds.flatten()[:5].tolist(),
-                    )
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1823,6 +1794,115 @@ class OpenCUA_VLForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: list[list[int]] | torch.Tensor | None,
+        video_grid_thw: list[list[int]] | torch.Tensor | None,
+        second_per_grid_ts: list[float] | None = None,
+        context_len: int = 0,
+        seq_len: int | None = None,
+        audio_feature_lengths: torch.Tensor | None = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        """Get 1D RoPE input positions for OpenCUA-VL model.
+
+        OpenCUA uses 1D RoPE instead of M-RoPE, so all position dimensions
+        (T, H, W) are set to the same 1D sequential position value.
+        """
+        if image_grid_thw is None:
+            image_grid_thw = []
+        if video_grid_thw is None:
+            video_grid_thw = []
+        if second_per_grid_ts is None:
+            second_per_grid_ts = []
+
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        vision_start_token_id = hf_config.vision_start_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        input_tokens_tensor = torch.tensor(input_tokens)
+        vision_start_indices = torch.argwhere(
+            input_tokens_tensor == vision_start_token_id
+        ).squeeze(1)
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = (vision_tokens == image_token_id).sum()
+        video_nums = (vision_tokens == video_token_id).sum()
+        llm_pos_ids_list: list = []
+
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
+            else:
+                ed_image = len(input_tokens) + 1
+            if remain_videos > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = (
+                    image_grid_thw[image_index][0],
+                    image_grid_thw[image_index][1],
+                    image_grid_thw[image_index][2],
+                )
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = (
+                    video_grid_thw[video_index][0],
+                    video_grid_thw[video_index][1],
+                    video_grid_thw[video_index][2],
+                )
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+            text_len = ed - st
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+
+            # Text tokens: 1D sequential positions
+            text_positions = torch.arange(text_len) + st_idx
+            llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
+
+            # Visual tokens: 1D sequential positions (all dimensions same)
+            visual_positions = torch.arange(num_visual_tokens) + text_len + st_idx
+            llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
+
+            # Skip the single <|media_placeholder|> token in input_tokens
+            st = ed + 1
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            text_positions = torch.arange(text_len) + st_idx
+            llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        llm_positions = llm_positions[:, context_len:seq_len]
+
+        return llm_positions, mrope_position_delta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         skip_prefixes = []
