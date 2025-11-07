@@ -6137,3 +6137,4 @@ def nvmlDevicePowerSmoothingSetState(device, state):
     fn = _nvmlGetFunctionPointer("nvmlDevicePowerSmoothingSetState")
     ret = fn(device, state)
     _nvmlCheckReturn(ret)
+    
