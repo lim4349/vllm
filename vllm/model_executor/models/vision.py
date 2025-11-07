@@ -354,7 +354,7 @@ def run_dp_sharded_mrope_vision_model(
 
     """
     tp_size = get_tensor_model_parallel_world_size()
-    
+
     # Optimization: if tp_size == 1, skip data parallel processing
     # to save memory and avoid unnecessary overhead
     if tp_size == 1:
@@ -365,7 +365,7 @@ def run_dp_sharded_mrope_vision_model(
                 image_embeds = torch.cat(image_embeds, dim=0)
         else:
             image_embeds = vision_model(pixel_values, grid_thw_list)
-        
+
         # Split embeddings for each image
         if rope_type == "rope_2d":
             embed_dim_reduction_factor = (
@@ -386,9 +386,7 @@ def run_dp_sharded_mrope_vision_model(
             hidden_dim = image_embeds.shape[2]
             # Reshape to (total_patches, hidden_dim) for splitting
             image_embeds = image_embeds.reshape(-1, hidden_dim)
-        return tuple(
-            image_embeds.split(sizes) if len(sizes) > 1 else (image_embeds,)
-        )
+        return tuple(image_embeds.split(sizes) if len(sizes) > 1 else (image_embeds,))
 
     # GPU_0 tp_rank_local = 0
     # GPU_1 tp_rank_local = 1

@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, AutoProcessor
+from transformers import BatchFeature
+
 # Import Qwen2.5-VL components dynamically to avoid import issues
 try:
     from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
@@ -28,22 +29,23 @@ try:
 except ImportError:
     # Fallback: create minimal classes
     from transformers import PretrainedConfig, ProcessorMixin
-    
+
     class Qwen2_5_VLProcessor(ProcessorMixin):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-    
+
     class Qwen2_5_VLConfig(PretrainedConfig):
         model_type = "qwen2_5_vl"
-        
+
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-    
+
     class Qwen2_5_VLVisionConfig(PretrainedConfig):
         model_type = "qwen2_5_vl_vision"
-        
+
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
+
 
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import (
@@ -78,10 +80,10 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsPP,
-    SupportsQuant,
     SupportsMultiModal,
     SupportsMultiModalPruning,
+    SupportsPP,
+    SupportsQuant,
 )
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
@@ -732,18 +734,18 @@ class OpenCUA_VisionTransformer(nn.Module):
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
         total_tokens = grid_t * llm_grid_h * llm_grid_w
-        
+
         # Simple sequential indexing for 1D RoPE
         # index는 merge 전 토큰 인덱스 (0 ~ total_tokens-1)
         index = torch.arange(total_tokens)
-        
+
         # cu_seqlens_window는 window attention을 위한 누적 시퀀스 길이
         # 각 merge된 토큰 그룹당 spatial_merge_unit 개의 토큰이 있음
         # 따라서 전체 시퀀스 길이는 total_tokens * spatial_merge_unit
         cu_seqlens = torch.tensor(
             [0, total_tokens * self.spatial_merge_unit], dtype=torch.int32
         )
-        
+
         return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
@@ -753,36 +755,26 @@ class OpenCUA_VisionTransformer(nn.Module):
         llm_grid_h = h // self.spatial_merge_size
         llm_grid_w = w // self.spatial_merge_size
         total_tokens = t * llm_grid_h * llm_grid_w
-        
-        # Actual sequence length after spatial merge unit expansion
-        # merge 후 실제 시퀀스 길이 = total_tokens * spatial_merge_unit
+
         actual_seq_len = total_tokens * self.spatial_merge_unit
-        
-        # Generate rotary position embeddings for actual sequence length
-        # rotary_pos_emb_1d shape: [actual_seq_len, head_dim // 2]
+
         rotary_pos_emb_1d_full = self.rotary_pos_emb_1d(actual_seq_len)
-        
-        # CRITICAL: Qwen2.5-VL과 동일한 shape로 reshape 필요
-        # rotary_pos_emb_thw는 [total_tokens // spatial_merge_unit, spatial_merge_unit, head_dim // 2]
-        # 1D RoPE도 동일한 shape로 reshape: [total_tokens, spatial_merge_unit, head_dim // 2]
+
+        # Reshape to match Qwen2.5-VL shape:
+        # [total_tokens, spatial_merge_unit, head_dim // 2]
         rotary_pos_emb_1d = rotary_pos_emb_1d_full.view(
             total_tokens, self.spatial_merge_unit, -1
         )
-        
-        # window_index로 인덱싱 (Qwen2.5-VL과 동일)
+
         rotary_pos_emb_1d = rotary_pos_emb_1d[window_index_1d, :, :]
-        
-        # Flatten (Qwen2.5-VL과 동일)
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
-        # 최종 shape: [actual_seq_len, head_dim // 2]
-        
-        # CRITICAL: cu_seqlens_1d는 Qwen2.5-VL의 cu_seqlens_thw와 동일한 형식이어야 함
-        # Qwen2.5-VL은 각 이미지/프레임별로 h*w를 반복함 (patch embedding 후 merge 전 토큰 수)
-        # 1D RoPE에서도 동일하게 h*w를 반복해야 함
+
+        # cu_seqlens_1d must match Qwen2.5-VL's cu_seqlens_thw format:
+        # repeat h*w for each image/frame (number of tokens before merge)
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
-        
+
         return (
             rotary_pos_emb_1d,
             window_index_1d,
@@ -946,7 +938,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         super().__init__(*args, **kwargs)
         # Cache for processor to avoid reloading
         self._cached_processor: Qwen2_5_VLProcessor | None = None
-    
+
     def get_hf_config(self):
         # Try to get OpenCUA_VLConfig first
         try:
@@ -955,10 +947,9 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # If the loaded config is OpenCUAConfig from the model repository,
             # load it directly and add vLLM-specific attributes if needed
             from transformers import AutoConfig
+
             model_path = self.ctx.model_config.model
-            config = AutoConfig.from_pretrained(
-                model_path, trust_remote_code=True
-            )
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
             # If it's already OpenCUAConfig from HF, add vLLM-specific attributes
             if hasattr(config, "model_type") and config.model_type == "opencua":
                 # Add vLLM-specific attributes if they don't exist
@@ -983,27 +974,30 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         return config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # If max_pixels is provided in kwargs, update the cached processor's image_processor
+        # If max_pixels is provided in kwargs, update the cached
+        # processor's image_processor
         if self._cached_processor is not None:
-            # If max_pixels is provided in kwargs, update the cached processor's image_processor
-            if "max_pixels" in kwargs and hasattr(self._cached_processor, "image_processor"):
-                current_max = getattr(self._cached_processor.image_processor, "max_pixels", None)
+            # If max_pixels is provided in kwargs, update the cached
+            # processor's image_processor
+            if "max_pixels" in kwargs and hasattr(
+                self._cached_processor, "image_processor"
+            ):
+                current_max = getattr(
+                    self._cached_processor.image_processor, "max_pixels", None
+                )
                 new_max = kwargs["max_pixels"]
                 if current_max is None or current_max < new_max:
                     self._cached_processor.image_processor.max_pixels = new_max
-                    logger.info(
-                        f"Updated cached processor's max_pixels from {current_max} to {new_max}"
-                    )
             return self._cached_processor
-        
+
         from transformers import AutoImageProcessor, AutoTokenizer
-        
+
         # OpenCUA model path - use OpenCUA's own preprocessor/tokenizer
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
-        
+
         qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-        
+
         # Priority 1: Try to load image processor from OpenCUA model path
         opencua_image_processor = None
         try:
@@ -1012,15 +1006,14 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 trust_remote_code=True,
                 **kwargs,
             )
-            logger.info(
-                f"Loaded OpenCUA image processor from: {model_path}"
-            )
         except Exception as e:
             logger.warning(
-                f"Failed to load OpenCUA image processor from {model_path}: {e}. "
-                f"Will use Qwen2.5-VL processor."
+                "Failed to load OpenCUA image processor from %s: %s. "
+                "Will use Qwen2.5-VL processor.",
+                model_path,
+                e,
             )
-        
+
         # Load Qwen2.5-VL processor (has min_pixels attribute required by vLLM)
         processor = Qwen2_5_VLProcessor.from_pretrained(
             qwen2_vl_base,
@@ -1028,153 +1021,126 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=use_fast,
             **kwargs,
         )
-        
+
         # Replace image processor with OpenCUA's if available
-        # OpenCUA image processor may not have min_pixels/max_pixels, but we should use it anyway
+        # OpenCUA image processor may not have min_pixels/max_pixels,
+        # but we should use it anyway
         if opencua_image_processor is not None:
             # If OpenCUA image processor doesn't have min_pixels/max_pixels,
             # add them from Qwen2.5-VL processor
             qwen_image_processor = processor.image_processor
-            
-            # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels, 3) OpenCUA's max_pixels
+
+            # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels,
+            # 3) OpenCUA's max_pixels
             target_max_pixels = None
             if "max_pixels" in kwargs:
-                # Highest priority: use max_pixels from kwargs (e.g., from mm_processor_kwargs)
+                # Highest priority: use max_pixels from kwargs
+                # (e.g., from mm_processor_kwargs)
                 target_max_pixels = kwargs["max_pixels"]
-                logger.info(f"Using max_pixels from kwargs: {target_max_pixels}")
             elif hasattr(qwen_image_processor, "max_pixels"):
                 # Second priority: use Qwen2.5-VL processor's max_pixels
                 target_max_pixels = qwen_image_processor.max_pixels
-                logger.info(f"Using max_pixels from Qwen2.5-VL processor: {target_max_pixels}")
-            
-            if not hasattr(opencua_image_processor, "min_pixels"):
-                if hasattr(qwen_image_processor, "min_pixels"):
-                    opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
-                    logger.info("Added min_pixels to OpenCUA image processor from Qwen2.5-VL")
-            
-            # CRITICAL: Always ensure max_pixels is set to the highest available value
+
+            if not hasattr(opencua_image_processor, "min_pixels") and hasattr(
+                qwen_image_processor, "min_pixels"
+            ):
+                opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
+
             if target_max_pixels is not None:
                 if not hasattr(opencua_image_processor, "max_pixels"):
                     opencua_image_processor.max_pixels = target_max_pixels
-                    logger.info(
-                        f"Added max_pixels to OpenCUA image processor: {target_max_pixels}"
-                    )
                 else:
-                    # Upgrade if current max_pixels is lower than target
                     current_max = opencua_image_processor.max_pixels
                     if current_max < target_max_pixels:
                         opencua_image_processor.max_pixels = target_max_pixels
-                        logger.info(
-                            f"Upgraded max_pixels from {current_max} to {target_max_pixels} "
-                            f"for better text recognition"
-                        )
-            elif hasattr(opencua_image_processor, "max_pixels"):
-                # If OpenCUA has max_pixels but no target, log it
-                logger.info(
-                    f"Using OpenCUA image processor's max_pixels: {opencua_image_processor.max_pixels}"
-                )
-            # Log the actual pixel limits for debugging
-            if hasattr(opencua_image_processor, "min_pixels") and hasattr(opencua_image_processor, "max_pixels"):
-                logger.info(
-                    f"OpenCUA image processor pixel limits: "
-                    f"min={opencua_image_processor.min_pixels}, "
-                    f"max={opencua_image_processor.max_pixels}"
-                )
             processor.image_processor = opencua_image_processor
-            logger.info("Replaced processor image_processor with OpenCUA image processor")
-        
+
         # Load OpenCUA tokenizer (highest priority)
         opencua_tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,
             use_fast=use_fast,
         )
-        logger.info(
-            f"Loaded OpenCUA tokenizer from: {model_path}, "
-            f"tokenizer type: {type(opencua_tokenizer).__name__}"
-        )
-        
+
         # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = opencua_tokenizer
-        
+
         # Get OpenCUA config for token IDs
         hf_config = self.get_hf_config()
-        
-        # Set processor.image_token and processor.video_token to OpenCUA tokens
-        # OpenCUA uses <|media_placeholder|> scheme instead of <|image_pad|>
-        # CRITICAL: Must use media_placeholder, NOT image_pad or other names
+
         vocab = opencua_tokenizer.get_vocab()
-        
-        # CRITICAL: Must use <|media_placeholder|> for OpenCUA
-        # This is required for proper text recognition
         if "<|media_placeholder|>" not in vocab:
             raise ValueError(
-                f"<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
-                f"This is required for proper text recognition."
+                "<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
+                "This is required for proper text recognition."
             )
-        
-        # Get the actual token ID from vocab (not from config)
-        # This ensures we use the correct token ID that matches the tokenizer
+
         media_placeholder_id = vocab["<|media_placeholder|>"]
-        
-        # CRITICAL: EOS 토큰 ID 확인 및 검증
-        # config의 image_token_id가 EOS와 같으면 안 됨 (151644가 EOS인 경우 문제 발생)
         eos_token_id = None
-        if hasattr(opencua_tokenizer, "eos_token_id") and opencua_tokenizer.eos_token_id is not None:
+        if (
+            hasattr(opencua_tokenizer, "eos_token_id")
+            and opencua_tokenizer.eos_token_id is not None
+        ):
             eos_token_id = opencua_tokenizer.eos_token_id
         elif hasattr(opencua_tokenizer, "eos_token") and opencua_tokenizer.eos_token:
-            eos_token_id = opencua_tokenizer.convert_tokens_to_ids(opencua_tokenizer.eos_token)
-        
-        # CRITICAL: EOS 토큰 ID 검증 - config의 image_token_id가 EOS와 같으면 안 됨
-        if hasattr(hf_config, "image_token_id") and eos_token_id is not None:
-            if hf_config.image_token_id == eos_token_id:
-                logger.error(
-                    f"Config image_token_id ({hf_config.image_token_id}) is EOS token ID! "
-                    f"This will cause serious issues. "
-                    f"Expected <|media_placeholder|> ID: {media_placeholder_id}, "
-                    f"EOS token ID: {eos_token_id}. "
-                    f"Auto-correcting to <|media_placeholder|> ID."
-                )
-        
-        # CRITICAL: <|media_placeholder|> ID도 EOS와 같으면 안 됨
+            eos_token_id = opencua_tokenizer.convert_tokens_to_ids(
+                opencua_tokenizer.eos_token
+            )
+
+        # Validate that image_token_id is not the same as EOS token ID
+        if (
+            hasattr(hf_config, "image_token_id")
+            and eos_token_id is not None
+            and hf_config.image_token_id == eos_token_id
+        ):
+            logger.error(
+                "Config image_token_id (%s) is EOS token ID! "
+                "This will cause serious issues. "
+                "Expected <|media_placeholder|> ID: %s, "
+                "EOS token ID: %s. "
+                "Auto-correcting to <|media_placeholder|> ID.",
+                hf_config.image_token_id,
+                media_placeholder_id,
+                eos_token_id,
+            )
+
+        # Validate that media_placeholder ID is not the same as EOS token ID
         if eos_token_id is not None and media_placeholder_id == eos_token_id:
             raise ValueError(
-                f"<|media_placeholder|> token ID ({media_placeholder_id}) is EOS token ID! "
+                f"<|media_placeholder|> token ID ({media_placeholder_id}) "
+                f"is EOS token ID! "
                 f"This is a critical configuration error. "
                 f"EOS token ID: {eos_token_id}. "
                 f"Please check the tokenizer configuration."
             )
-        
-        # CRITICAL: 모델 config 동기화 - 항상 토크나이저에서 실제 ID를 조회해서 config를 덮어쓰기
-        # 런타임에서 업데이트하므로 엔진 재기동 시에도 올바른 ID가 사용됨
+
+        # Sync config with actual token IDs from tokenizer
         if hasattr(hf_config, "image_token_id"):
             if hf_config.image_token_id != media_placeholder_id:
-                if eos_token_id is not None and hf_config.image_token_id == eos_token_id:
-                    # EOS와 같으면 이미 위에서 에러 로그 출력
+                if (
+                    eos_token_id is not None
+                    and hf_config.image_token_id == eos_token_id
+                ):
                     pass
                 else:
                     logger.warning(
-                        f"Config image_token_id ({hf_config.image_token_id}) != "
-                        f"actual <|media_placeholder|> ({media_placeholder_id}). "
-                        f"Updating config."
+                        "Config image_token_id (%s) != "
+                        "actual <|media_placeholder|> (%s). "
+                        "Updating config.",
+                        hf_config.image_token_id,
+                        media_placeholder_id,
                     )
-            # 항상 실제 token ID로 덮어쓰기 (EOS와 같아도 자동 수정)
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
-        
+
         # Use the actual token ID (from vocab, not from config)
         image_token_id = media_placeholder_id
         video_token_id = media_placeholder_id
-        
-        # Set processor tokens - MUST use media_placeholder
+
         processor.image_token = "<|media_placeholder|>"
-        processor.video_token = "<|media_placeholder|>"  # OpenCUA uses same token
-        logger.info(
-            f"Set processor tokens to <|media_placeholder|> "
-            f"(token_id={media_placeholder_id})"
-        )
-        
+        processor.video_token = "<|media_placeholder|>"
+
         # Verify processor is NOT using wrong token names
         if processor.image_token != "<|media_placeholder|>":
             raise ValueError(
@@ -1182,13 +1148,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 f"but got '{processor.image_token}'. "
                 f"This will break text recognition."
             )
-        
+
         # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
         def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
             """Patched version that uses OpenCUA config token IDs directly"""
             if modalities is None:
                 modalities = ["image", "video"]
-            
+
             # Get input_ids tensor/list
             input_ids = text_inputs["input_ids"]
             if hasattr(input_ids, "tolist"):
@@ -1197,7 +1163,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     input_ids_list = input_ids_list[0]
             else:
                 input_ids_list = input_ids
-            
+
             for modality in modalities:
                 if modality == "image":
                     token_id = image_token_id
@@ -1205,71 +1171,86 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     token_id = video_token_id
                 else:
                     continue
-                
+
                 # Count occurrences in tokenized input_ids using config token ID
                 ids_count = input_ids_list.count(token_id)
-                
+
                 if ids_count > 0:
-                    logger.debug(
-                        f"Found {ids_count} {modality} token(s) (token_id={token_id}) in input_ids"
-                    )
-        
+                    pass
+
         # Apply the monkey patch
         processor._check_special_mm_tokens = patched_check_special_mm_tokens
-        
+
         # Get OpenCUA chat template from OpenCUA tokenizer
         chat_template = None
-        if hasattr(opencua_tokenizer, "chat_template") and opencua_tokenizer.chat_template:
+        if (
+            hasattr(opencua_tokenizer, "chat_template")
+            and opencua_tokenizer.chat_template
+        ):
             chat_template = opencua_tokenizer.chat_template
-            logger.info("Found chat_template attribute in OpenCUA tokenizer")
         elif hasattr(opencua_tokenizer, "get_chat_template"):
             try:
                 chat_template = opencua_tokenizer.get_chat_template()
-                logger.info("Retrieved chat_template via get_chat_template() from OpenCUA tokenizer")
             except Exception as e:
-                logger.warning(f"Failed to get chat_template from OpenCUA tokenizer: {e}")
-        
+                logger.warning(
+                    "Failed to get chat_template from OpenCUA tokenizer: %s", e
+                )
+
         # Set chat_template to processor
         if chat_template:
             # Optionally inject system prompt from environment variable
             import os
+
             system_prompt_env = os.getenv("OPENCUA_SYSTEM_PROMPT")
             if system_prompt_env:
                 # Wrap chat_template to inject system prompt
                 original_template = chat_template
-                
+
                 def modified_chat_template(messages, tokenizer, **kwargs):
                     # Check if system message already exists
                     has_system = messages and messages[0].get("role") == "system"
-                    
+
                     if not has_system:
                         # Prepend system message
-                        messages = [{"role": "system", "content": system_prompt_env}] + messages
-                    
+                        messages = [
+                            {"role": "system", "content": system_prompt_env}
+                        ] + messages
+
                     # Use original template
                     if callable(original_template):
-                        return original_template(messages, tokenizer=tokenizer, **kwargs)
-                    else:
-                        # If it's a string (Jinja template), use tokenizer.apply_chat_template
-                        return tokenizer.apply_chat_template(
-                            messages, tokenizer=tokenizer, chat_template=original_template, **kwargs
+                        return original_template(
+                            messages, tokenizer=tokenizer, **kwargs
                         )
-                
+                    else:
+                        # If it's a string (Jinja template),
+                        # use tokenizer.apply_chat_template
+                        return tokenizer.apply_chat_template(
+                            messages,
+                            tokenizer=tokenizer,
+                            chat_template=original_template,
+                            **kwargs,
+                        )
+
                 processor.chat_template = modified_chat_template
-                logger.info(f"Injected system prompt from OPENCUA_SYSTEM_PROMPT: {system_prompt_env[:50]}...")
             else:
                 processor.chat_template = chat_template
-            logger.info("Set OpenCUA chat_template to processor")
-        
-        # CRITICAL: ID 고정 검증 (시작 시 1회 assertion)
-        # 모든 special tokens가 UNK가 아니고 값이 기대와 일치해야 함
+
+        # Validate all required special tokens exist and are not UNK
         im_tokens = ["<|im_user|>", "<|im_assistant|>", "<|im_end|>"]
-        media_tokens = ["<|media_begin|>", "<|media_content|>", "<|media_end|>", "<|media_placeholder|>"]
+        media_tokens = [
+            "<|media_begin|>",
+            "<|media_content|>",
+            "<|media_end|>",
+            "<|media_placeholder|>",
+        ]
         all_required_tokens = im_tokens + media_tokens
-        
-        unk_token_id = opencua_tokenizer.unk_token_id if hasattr(opencua_tokenizer, "unk_token_id") else None
-        
-        # Assertion: 모든 토큰이 vocab에 있고 UNK가 아님
+
+        unk_token_id = (
+            opencua_tokenizer.unk_token_id
+            if hasattr(opencua_tokenizer, "unk_token_id")
+            else None
+        )
+
         for token_str in all_required_tokens:
             assert token_str in vocab, (
                 f"Missing required token: {token_str}. "
@@ -1281,21 +1262,16 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     f"Token {token_str} mapped to UNK (id={token_id}). "
                     f"This will break text recognition."
                 )
-        
-        # Assertion: processor.image_token_id == tokenizer의 실제 <|media_placeholder|> ID
-        actual_media_placeholder_id = opencua_tokenizer.convert_tokens_to_ids("<|media_placeholder|>")
+
+        actual_media_placeholder_id = opencua_tokenizer.convert_tokens_to_ids(
+            "<|media_placeholder|>"
+        )
         assert actual_media_placeholder_id == media_placeholder_id, (
             f"processor.image_token_id mismatch: "
             f"vocab={media_placeholder_id}, "
             f"convert_tokens_to_ids={actual_media_placeholder_id}"
         )
-        
-        logger.info(
-            f"All required OpenCUA special tokens validated "
-            f"(im: {len(im_tokens)}, media: {len(media_tokens)}, "
-            f"total: {len(all_required_tokens)})"
-        )
-        
+
         # Cache the processor to avoid reloading
         self._cached_processor = processor
         return processor
@@ -1318,7 +1294,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
-    
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -1335,14 +1311,14 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        # Use Qwen2.5-VL's approach: get token IDs from processor's image_token/video_token strings
+        # Use Qwen2.5-VL's approach: get token IDs from processor's
+        # image_token/video_token strings
         # This matches what Qwen2VLDummyInputsBuilder generates
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-        
-        # CRITICAL: Verify processor is using media_placeholder (not image_pad)
+
         if hf_processor.image_token != "<|media_placeholder|>":
             raise ValueError(
                 f"processor.image_token must be '<|media_placeholder|>', "
@@ -1350,56 +1326,46 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"This will break text recognition. "
                 f"Please ensure OpenCUA processor is correctly configured."
             )
-        
-        # Get token IDs from vocab (actual token IDs, not from config)
-        # This ensures we use the correct token ID that matches the tokenizer
+
         if hf_processor.image_token not in vocab:
             raise ValueError(
-                f"processor.image_token '{hf_processor.image_token}' not found in vocab. "
+                f"processor.image_token '{hf_processor.image_token}' "
+                f"not found in vocab. "
                 f"This will break text recognition."
             )
-        
+
         # Get actual token ID from vocab
         media_placeholder_id = vocab[hf_processor.image_token]
-        
+
         # Get config for consistency check
         hf_config = self.info.get_hf_config()
-        
-        # CRITICAL: 모델 config 동기화 - 항상 토크나이저에서 실제 ID를 조회해서 config를 덮어쓰기
-        # get_hf_processor에서 이미 업데이트했으므로 여기서는 조용히 동기화
+
         if hasattr(hf_config, "image_token_id"):
-            # 항상 실제 token ID로 덮어쓰기 (경고는 get_hf_processor에서만 출력)
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
-        
+
         # Use the actual token ID from vocab (not from config)
         replacement_token_id = {
             "image": media_placeholder_id,
             "video": media_placeholder_id,  # OpenCUA may use same token
         }
-        
+
         placeholder = {
             "image": media_placeholder_id,
             "video": media_placeholder_id,
         }
-        
-        logger.debug(
-            f"Using <|media_placeholder|> token ID {media_placeholder_id} "
-            f"for image/video placeholder replacement"
-        )
 
-        # CRITICAL: merge_size는 spatial_merge_size와 일치해야 함
-        # Qwen2.5-VL과 동일하게 image_processor.merge_size 사용
         merge_length = image_processor.merge_size**2
-        # 검증: merge_size가 실제 spatial_merge_size와 일치하는지 확인
         hf_config = self.info.get_hf_config()
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         if image_processor.merge_size != spatial_merge_size:
             logger.warning(
-                f"image_processor.merge_size ({image_processor.merge_size}) != "
-                f"spatial_merge_size ({spatial_merge_size}). "
-                f"Using image_processor.merge_size for compatibility."
+                "image_processor.merge_size (%s) != "
+                "spatial_merge_size (%s). "
+                "Using image_processor.merge_size for compatibility.",
+                image_processor.merge_size,
+                spatial_merge_size,
             )
 
         def get_replacement_opencua(item_idx: int, modality: str):
@@ -1407,30 +1373,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
-            # CRITICAL: placeholder ↔ grid 일치 assertion
             # grid_thw shape: (t, h, w) - temporal, height, width in patches
-            # merge 후 실제 visual token 수 = (t×h×w) // merge_length
-            # merge_length = spatial_merge_size^2 (예: 2^2 = 4)
+            # num_tokens = (t×h×w) // merge_length
             grid_t, grid_h, grid_w = map(int, grid_thw)
             total_patches = grid_t * grid_h * grid_w
             num_tokens = total_patches // merge_length
-            
-            # CRITICAL: visual token 수가 0보다 커야 함
+
             assert num_tokens > 0, (
                 f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
                 f"(grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
                 f"total_patches={total_patches}, merge_length={merge_length}). "
                 f"This will break text recognition. "
                 f"Check image processing configuration."
-            )
-            
-            logger.info(
-                f"{modality.upper()} item {item_idx} replacement: "
-                f"grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
-                f"total_patches={total_patches}, "
-                f"merge_length={merge_length}, "
-                f"num_visual_tokens={num_tokens}, "
-                f"replacement_token_id={replacement_token_id[modality]}"
             )
 
             return [replacement_token_id[modality]] * num_tokens
@@ -1483,8 +1437,7 @@ class OpenCUA_VLForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        # CRITICAL: OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
-        # This must match processor.image_token and processor.video_token
+        # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
         if modality.startswith("image"):
             return "<|media_placeholder|>"
         if modality.startswith("video"):
@@ -1524,14 +1477,24 @@ class OpenCUA_VLForConditionalGeneration(
             # If text_config is not set, create one from the main config
             # Extract text model parameters from the main config
             from transformers.models.qwen2 import Qwen2Config
+
             text_config_dict = {
-                k: v for k, v in config.to_dict().items()
-                if k not in ["vision_config", "model_type", "media_placeholder_token_id",
-                             "image_token_id", "video_token_id", "vision_start_token_id",
-                             "vision_end_token_id", "use_1d_rope"]
+                k: v
+                for k, v in config.to_dict().items()
+                if k
+                not in [
+                    "vision_config",
+                    "model_type",
+                    "media_placeholder_token_id",
+                    "image_token_id",
+                    "video_token_id",
+                    "vision_start_token_id",
+                    "vision_end_token_id",
+                    "use_1d_rope",
+                ]
             }
             text_config = Qwen2Config(**text_config_dict)
-        
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
@@ -1789,7 +1752,28 @@ class OpenCUA_VLForConditionalGeneration(
         if self.visual is None:
             skip_prefixes.extend(["visual."])
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+        # Check critical vision components
+        critical_components = [
+            "visual.patch_embed",
+            "visual.rotary_pos_emb",
+            "visual.blocks.0",
+            "visual.merger",
+        ]
+        missing_components = []
+        for component in critical_components:
+            if not any(p.startswith(component) for p in loaded_params):
+                missing_components.append(component)
+
+        if missing_components:
+            logger.warning(
+                "OpenCUA missing critical vision components: %s. "
+                "This may cause vision processing issues.",
+                missing_components,
+            )
+
+        return loaded_params
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

@@ -22,7 +22,6 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
-from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.midashenglm import MiDashengLMConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
@@ -31,6 +30,7 @@ from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.olmo3 import Olmo3Config
+from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.transformers_utils.configs.radio import RadioConfig
