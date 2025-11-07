@@ -904,6 +904,9 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
+        # Remove the extra dimension before merger
+        # hidden_states shape: [seq_len, 1, context_dim] -> [seq_len, context_dim]
+        hidden_states = hidden_states.squeeze(1)
         # Debug: log before merger
         logger.warning(
             "OpenCUA before merger: shape=%s, dtype=%s, mean=%.6f, std=%.6f",
