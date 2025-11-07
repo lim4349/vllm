@@ -98,7 +98,11 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
+from .vision import (
+    conv3d_to_linear_weight,
+    get_vit_attn_backend,
+    run_dp_sharded_mrope_vision_model,
+)
 
 logger = init_logger(__name__)
 
@@ -917,6 +921,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1759,9 +1766,9 @@ class OpenCUA_VLForConditionalGeneration(
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         # Check critical vision components
+        # Note: rotary_pos_emb is not a weight parameter (it's computed at runtime)
         critical_components = [
             "visual.patch_embed",
-            "visual.rotary_pos_emb",
             "visual.blocks.0",
             "visual.merger",
         ]
