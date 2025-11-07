@@ -745,14 +745,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         index = torch.arange(total_tokens)
 
         # cu_seqlens_window는 window attention을 위한 누적 시퀀스 길이
-        # 1D RoPE의 경우, 각 토큰을 하나의 window로 취급
-        # 각 토큰은 spatial_merge_unit 개의 실제 토큰을 포함
-        # 따라서 cu_seqlens는 [0, spatial_merge_unit, 2*spatial_merge_unit, ...]
-        cu_seqlens = torch.arange(
-            0,
-            (total_tokens + 1) * self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            dtype=torch.int32,
+        # 각 merge된 토큰 그룹당 spatial_merge_unit 개의 토큰이 있음
+        # 따라서 전체 시퀀스 길이는 total_tokens * spatial_merge_unit
+        cu_seqlens = torch.tensor(
+            [0, total_tokens * self.spatial_merge_unit], dtype=torch.int32
         )
 
         return index, cu_seqlens
@@ -1884,23 +1880,20 @@ class OpenCUA_VLForConditionalGeneration(
             # (ed is <|media_placeholder|> position)
             # In input_tokens, ed points to <|media_placeholder|> token,
             # which will be replaced by num_visual_tokens visual embeddings
-            # text_len should exclude the <|media_placeholder|> token
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
             # Text tokens: 1D sequential positions
-            # text_len includes the <|media_placeholder|> token position,
+            # Note: text_len includes the <|media_placeholder|> token position,
             # but we assign positions to text tokens only (excluding the placeholder)
-            # So we use text_len - 1 for text tokens
-            text_positions = torch.arange(text_len - 1) + st_idx
+            text_positions = torch.arange(text_len) + st_idx
             llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
 
             # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after text tokens (excluding the placeholder position)
-            # So we use text_len - 1 (not text_len) as the starting offset
-            visual_positions = torch.arange(num_visual_tokens) + (text_len - 1) + st_idx
+            # Position starts after text tokens (including the placeholder position)
+            visual_positions = torch.arange(num_visual_tokens) + text_len + st_idx
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
 
             # Skip the single <|media_placeholder|> token in input_tokens
