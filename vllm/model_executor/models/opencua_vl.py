@@ -1640,6 +1640,19 @@ class OpenCUA_VLForConditionalGeneration(
                     )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+                    # Debug: log vision transformer output
+                    logger.warning(
+                        "OpenCUA vision output: shape=%s, dtype=%s, "
+                        "mean=%.6f, std=%.6f, min=%.6f, max=%.6f, "
+                        "first_5_values=%s",
+                        image_embeds.shape,
+                        image_embeds.dtype,
+                        image_embeds.mean().item(),
+                        image_embeds.std().item(),
+                        image_embeds.min().item(),
+                        image_embeds.max().item(),
+                        image_embeds.flatten()[:5].tolist(),
+                    )
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
