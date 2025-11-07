@@ -9,6 +9,7 @@
 
 """Inference-only OpenCUA-VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -62,6 +63,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -536,18 +538,15 @@ class OpenCUA_VisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nn.Conv3d(
-            in_channels,
+        self.proj = ReplicatedLinear(
+            in_channels * math.prod(kernel_size),
             hidden_size,
-            kernel_size=kernel_size,
-            stride=kernel_size,
             bias=False,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.hidden_size)
+        x = self.proj(x)
         return x
 
 
