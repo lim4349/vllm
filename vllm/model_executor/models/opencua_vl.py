@@ -1887,6 +1887,15 @@ class OpenCUA_VLForConditionalGeneration(
         OpenCUA uses 1D RoPE instead of M-RoPE, so all position dimensions
         (T, H, W) are set to the same 1D sequential position value.
         """
+        logger.warning(
+            "OpenCUA get_mrope_input_positions called: input_tokens_len=%d, "
+            "image_grid_thw=%s, video_grid_thw=%s, context_len=%d, seq_len=%s",
+            len(input_tokens),
+            image_grid_thw,
+            video_grid_thw,
+            context_len,
+            seq_len,
+        )
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
@@ -1976,20 +1985,21 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
 
             # Debug: log position ranges for validation
-            if len(llm_pos_ids_list) == 2:
-                logger.warning(
-                    "OpenCUA position debug: text_len=%d, actual_text_len=%d, "
-                    "num_visual_tokens=%d, st_idx=%d, "
-                    "text_positions=[%d..%d], visual_positions=[%d..%d]",
-                    text_len,
-                    actual_text_len,
-                    num_visual_tokens,
-                    st_idx,
-                    text_positions[0].item() if len(text_positions) > 0 else -1,
-                    text_positions[-1].item() if len(text_positions) > 0 else -1,
-                    visual_positions[0].item() if len(visual_positions) > 0 else -1,
-                    visual_positions[-1].item() if len(visual_positions) > 0 else -1,
-                )
+            logger.warning(
+                "OpenCUA position debug: text_len=%d, actual_text_len=%d, "
+                "num_visual_tokens=%d, st_idx=%d, "
+                "text_positions=[%d..%d], visual_positions=[%d..%d], "
+                "llm_pos_ids_list_len=%d",
+                text_len,
+                actual_text_len,
+                num_visual_tokens,
+                st_idx,
+                text_positions[0].item() if len(text_positions) > 0 else -1,
+                text_positions[-1].item() if len(text_positions) > 0 else -1,
+                visual_positions[0].item() if len(visual_positions) > 0 else -1,
+                visual_positions[-1].item() if len(visual_positions) > 0 else -1,
+                len(llm_pos_ids_list),
+            )
 
             # Skip the single <|media_placeholder|> token in input_tokens
             # (it will be replaced by num_visual_tokens visual embeddings)
