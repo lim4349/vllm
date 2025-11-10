@@ -1599,6 +1599,15 @@ class OpenCUA_VLForConditionalGeneration(
                     "rope_type": "default",
                     "mrope_section": mrope_section,
                 }
+                logger.warning(
+                    "OpenCUA mrope_section: head_dim=%d, rotary_dim=%d, "
+                    "mrope_section=%s (sum=%d, expected=%d)",
+                    head_dim,
+                    rotary_dim,
+                    mrope_section,
+                    sum(mrope_section),
+                    rotary_dim // 2,
+                )
             text_config = Qwen2Config(**text_config_dict)
 
         self.language_model = init_vllm_registered_model(
@@ -1965,6 +1974,22 @@ class OpenCUA_VLForConditionalGeneration(
                 torch.arange(num_visual_tokens) + actual_text_len + st_idx
             )
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
+
+            # Debug: log position ranges for validation
+            if len(llm_pos_ids_list) == 2:
+                logger.warning(
+                    "OpenCUA position debug: text_len=%d, actual_text_len=%d, "
+                    "num_visual_tokens=%d, st_idx=%d, "
+                    "text_positions=[%d..%d], visual_positions=[%d..%d]",
+                    text_len,
+                    actual_text_len,
+                    num_visual_tokens,
+                    st_idx,
+                    text_positions[0].item() if len(text_positions) > 0 else -1,
+                    text_positions[-1].item() if len(text_positions) > 0 else -1,
+                    visual_positions[0].item() if len(visual_positions) > 0 else -1,
+                    visual_positions[-1].item() if len(visual_positions) > 0 else -1,
+                )
 
             # Skip the single <|media_placeholder|> token in input_tokens
             # (it will be replaced by num_visual_tokens visual embeddings)
