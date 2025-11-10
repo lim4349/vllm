@@ -1901,23 +1901,26 @@ class OpenCUA_VLForConditionalGeneration(
             )
             # text_len includes text tokens from st to ed
             # (ed is <|media_placeholder|> position in input_tokens)
-            # Following Qwen2.5-VL: text_len includes placeholder,
-            # and visual positions start after text_len
+            # In actual sequence, placeholder is replaced by visual embeddings,
+            # so actual text tokens are from st to ed-1
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
             # Text tokens: 1D sequential positions
-            # text_len includes <|media_placeholder|> token position
-            # (following Qwen2.5-VL convention)
-            text_positions = torch.arange(text_len) + st_idx
+            # text_len includes <|media_placeholder|> in input_tokens,
+            # but in actual sequence it's replaced by visual embeddings,
+            # so text positions exclude the placeholder
+            actual_text_len = text_len - 1
+            text_positions = torch.arange(actual_text_len) + st_idx
             llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
 
             # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after text_len (including placeholder position)
-            # In actual sequence, placeholder is replaced by visual embeddings
-            visual_positions = torch.arange(num_visual_tokens) + text_len + st_idx
+            # Position starts after actual text tokens
+            visual_positions = (
+                torch.arange(num_visual_tokens) + actual_text_len + st_idx
+            )
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
 
             # Skip the single <|media_placeholder|> token in input_tokens
