@@ -1329,6 +1329,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # Use Qwen2.5-VL's approach: get token IDs from processor's
         # image_token/video_token strings
         # This matches what Qwen2VLDummyInputsBuilder generates
+        logger.warning("OpenCUA _get_prompt_updates called")
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -1407,7 +1408,8 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             )
 
             # Log placeholder count vs visual token count for validation
-            logger.info(
+            # This is called during _bind_and_group_updates -> resolve(item_idx)
+            logger.warning(
                 "OpenCUA %s item %d: placeholder_count=1, visual_token_count=%d, "
                 "grid_thw=[%d, %d, %d], merge_length=%d",
                 modality.upper(),
