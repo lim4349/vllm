@@ -671,7 +671,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         # Use 1D RoPE instead of M-RoPE
-        self.rotary_pos_emb = OpenCUA_VisionRotaryEmbedding(head_dim // 2)
+        # Load rope_theta from vision_config if available, otherwise use default
+        rope_theta = getattr(vision_config, "rope_theta", 10000.0)
+        self.rotary_pos_emb = OpenCUA_VisionRotaryEmbedding(
+            head_dim // 2, theta=rope_theta
+        )
 
         use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
@@ -1400,6 +1404,19 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"total_patches={total_patches}, merge_length={merge_length}). "
                 f"This will break text recognition. "
                 f"Check image processing configuration."
+            )
+
+            # Log placeholder count vs visual token count for validation
+            logger.info(
+                "OpenCUA %s item %d: placeholder_count=1, visual_token_count=%d, "
+                "grid_thw=[%d, %d, %d], merge_length=%d",
+                modality.upper(),
+                item_idx,
+                num_tokens,
+                grid_t,
+                grid_h,
+                grid_w,
+                merge_length,
             )
 
             return [replacement_token_id[modality]] * num_tokens
