@@ -739,23 +739,46 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def get_window_index_1d(self, grid_t, grid_h, grid_w):
-        """Simplified window indexing for 1D RoPE"""
-        llm_grid_h = grid_h // self.spatial_merge_size
-        llm_grid_w = grid_w // self.spatial_merge_size
-        total_tokens = grid_t * llm_grid_h * llm_grid_w
+        """Window indexing for 1D RoPE with spatial locality preserved.
 
-        # Simple sequential indexing for 1D RoPE
-        # index는 merge 전 토큰 인덱스 (0 ~ total_tokens-1)
-        index = torch.arange(total_tokens)
-
-        # cu_seqlens_window는 window attention을 위한 누적 시퀀스 길이
-        # 각 merge된 토큰 그룹당 spatial_merge_unit 개의 토큰이 있음
-        # 따라서 전체 시퀀스 길이는 total_tokens * spatial_merge_unit
-        cu_seqlens = torch.tensor(
-            [0, total_tokens * self.spatial_merge_unit], dtype=torch.int32
+        Even though we use 1D RoPE, we still need to preserve spatial
+        locality for window attention to work correctly.
+        """
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
         )
 
-        return index, cu_seqlens
+        llm_grid_h = grid_h // self.spatial_merge_size
+        llm_grid_w = grid_w // self.spatial_merge_size
+        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+            grid_t, llm_grid_h, llm_grid_w
+        )
+        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
+        index_padded = index_padded.reshape(
+            grid_t,
+            num_windows_h,
+            vit_merger_window_size,
+            num_windows_w,
+            vit_merger_window_size,
+        )
+        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
+            grid_t,
+            num_windows_h * num_windows_w,
+            vit_merger_window_size,
+            vit_merger_window_size,
+        )
+        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+        index_padded = index_padded.reshape(-1)
+        index_new = index_padded[index_padded != -100]
+        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
+        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
+        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        return index_new, cu_seqlens_tmp
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
@@ -1762,7 +1785,7 @@ class OpenCUA_VLForConditionalGeneration(
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                        self.visual, pixel_values, grid_thw_list, rope_type="rope_1d"
                     )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -1796,7 +1819,7 @@ class OpenCUA_VLForConditionalGeneration(
                         self.visual,
                         pixel_values_videos,
                         grid_thw_list,
-                        rope_type="rope_3d",
+                        rope_type="rope_1d",
                     )
                 else:
                     video_embeds = self.visual(
@@ -1905,10 +1928,10 @@ class OpenCUA_VLForConditionalGeneration(
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
-        """Get M-RoPE input positions for OpenCUA-VL model.
+        """Get 1D RoPE input positions for OpenCUA-VL model.
 
-        OpenCUA now uses M-RoPE (3D positions) by default, similar to Qwen2.5-VL.
-        The 1D RoPE version is kept as a comment for reference.
+        OpenCUA uses 1D RoPE instead of M-RoPE, so all position dimensions
+        (T, H, W) are set to the same 1D sequential position value.
         """
         if image_grid_thw is None:
             image_grid_thw = []
@@ -1921,7 +1944,6 @@ class OpenCUA_VLForConditionalGeneration(
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
 
         input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(
@@ -1937,7 +1959,6 @@ class OpenCUA_VLForConditionalGeneration(
 
         image_index, video_index = 0, 0
         for _ in range(image_nums + video_nums):
-            video_second_per_grid_t = 0.0
             if remain_images > 0:
                 try:
                     ed_image = input_tokens.index(image_token_id, st)
@@ -1967,9 +1988,6 @@ class OpenCUA_VLForConditionalGeneration(
                     video_grid_thw[video_index][1],
                     video_grid_thw[video_index][2],
                 )
-                video_second_per_grid_t = 1.0
-                if second_per_grid_ts:
-                    video_second_per_grid_t = second_per_grid_ts[video_index]
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video
@@ -1980,61 +1998,29 @@ class OpenCUA_VLForConditionalGeneration(
                 w // spatial_merge_size,
             )
             text_len = ed - st
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(
-                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-            )
 
-            # M-RoPE: Calculate 3D positions (T, H, W) for visual tokens
-            t_index = (
-                (
-                    torch.arange(llm_grid_t)
-                    .view(-1, 1)
-                    .expand(-1, llm_grid_h * llm_grid_w)
-                    * video_second_per_grid_t
-                    * tokens_per_second
-                )
-                .long()
-                .flatten()
-            )
+            # Text tokens: 1D sequential positions (all dimensions same)
+            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
+            text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            llm_pos_ids_list.append(text_positions)
 
-            h_index = (
-                torch.arange(llm_grid_h)
-                .view(1, -1, 1)
-                .expand(llm_grid_t, -1, llm_grid_w)
-                .flatten()
+            # Visual tokens: 1D sequential positions (all dimensions same)
+            # Position starts after text tokens (including placeholder)
+            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
+            visual_positions = (
+                torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
+                + text_len
+                + st_idx
             )
-
-            w_index = (
-                torch.arange(llm_grid_w)
-                .view(1, 1, -1)
-                .expand(llm_grid_t, llm_grid_h, -1)
-                .flatten()
-            )
-
-            llm_pos_ids_list.append(
-                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
-            )
+            llm_pos_ids_list.append(visual_positions)
 
             # Skip the placeholder token in input_tokens
             # (placeholder is replaced by num_visual_tokens visual embeddings
             # in actual sequence)
-            # Note: For M-RoPE, we skip by visual token count like Qwen2.5-VL
-            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
-
-            # 1D RoPE version (disabled, kept for reference):
-            # # Visual tokens: 1D sequential positions (all dimensions same)
-            # # Position starts after text tokens (including placeholder)
-            # # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
-            # num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            # visual_positions = (
-            #     torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
-            #     + text_len
-            #     + st_idx
-            # )
-            # llm_pos_ids_list.append(visual_positions)
-            # st = ed + 1
+            st = ed + 1
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
