@@ -1505,6 +1505,7 @@ class OpenCUA_VLForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        logger.warning("OpenCUA_VLForConditionalGeneration.__init__ called")
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1553,6 +1554,11 @@ class OpenCUA_VLForConditionalGeneration(
 
         # Use text_config for language model initialization
         # (Qwen2ForCausalLM expects Qwen2Config, not OpenCUA_VLConfig)
+        logger.warning(
+            "OpenCUA_VLForConditionalGeneration.__init__: checking text_config, "
+            "config.text_config=%s",
+            getattr(config, "text_config", None),
+        )
         text_config = getattr(config, "text_config", None)
         if text_config is None:
             # If text_config is not set, create one from the main config
@@ -1577,6 +1583,15 @@ class OpenCUA_VLForConditionalGeneration(
             # OpenCUA uses 1D RoPE, but implements SupportsMRoPE interface
             # Set rope_scaling to enable M-RoPE position calculation
             # (get_mrope_input_positions will use 1D sequential positions)
+            logger.warning(
+                "OpenCUA rope_scaling check: rope_scaling in text_config_dict=%s",
+                "rope_scaling" in text_config_dict,
+            )
+            if "rope_scaling" in text_config_dict:
+                logger.warning(
+                    "OpenCUA rope_scaling already exists: %s",
+                    text_config_dict["rope_scaling"],
+                )
             if "rope_scaling" not in text_config_dict:
                 # Calculate mrope_section for 1D RoPE
                 # For 1D RoPE, we split rotary_dim equally across T, H, W
@@ -1600,13 +1615,18 @@ class OpenCUA_VLForConditionalGeneration(
                     "mrope_section": mrope_section,
                 }
                 logger.warning(
-                    "OpenCUA mrope_section: head_dim=%d, rotary_dim=%d, "
+                    "OpenCUA mrope_section created: head_dim=%d, rotary_dim=%d, "
                     "mrope_section=%s (sum=%d, expected=%d)",
                     head_dim,
                     rotary_dim,
                     mrope_section,
                     sum(mrope_section),
                     rotary_dim // 2,
+                )
+            else:
+                logger.warning(
+                    "OpenCUA mrope_section from existing rope_scaling: %s",
+                    text_config_dict["rope_scaling"],
                 )
             text_config = Qwen2Config(**text_config_dict)
 
@@ -2014,6 +2034,25 @@ class OpenCUA_VLForConditionalGeneration(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
+
+        logger.warning(
+            "OpenCUA get_mrope_input_positions result: llm_positions.shape=%s, "
+            "mrope_position_delta=%d, context_len=%d, seq_len=%s, "
+            "llm_positions[0, :5]=%s, llm_positions[1, :5]=%s, llm_positions[2, :5]=%s",
+            llm_positions.shape,
+            mrope_position_delta,
+            context_len,
+            seq_len,
+            llm_positions[0, :5].tolist()
+            if llm_positions.shape[1] >= 5
+            else llm_positions[0, :].tolist(),
+            llm_positions[1, :5].tolist()
+            if llm_positions.shape[1] >= 5
+            else llm_positions[1, :].tolist(),
+            llm_positions[2, :5].tolist()
+            if llm_positions.shape[1] >= 5
+            else llm_positions[2, :].tolist(),
+        )
 
         return llm_positions, mrope_position_delta
 
