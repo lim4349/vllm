@@ -1045,6 +1045,16 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # add them from Qwen2.5-VL processor
             qwen_image_processor = processor.image_processor
 
+            # Log image processor parameters for verification
+            logger.warning(
+                "OpenCUA image processor loaded: size=%s, "
+                "image_mean=%s, image_std=%s, interpolation=%s",
+                getattr(opencua_image_processor, "size", None),
+                getattr(opencua_image_processor, "image_mean", None),
+                getattr(opencua_image_processor, "image_std", None),
+                getattr(opencua_image_processor, "resample", None),
+            )
+
             # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels,
             # 3) OpenCUA's max_pixels
             target_max_pixels = None
@@ -1213,6 +1223,19 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         # Set chat_template to processor
         if chat_template:
+            # Log chat template for verification
+            if isinstance(chat_template, str):
+                logger.warning(
+                    "OpenCUA chat_template loaded (length=%d, first_100_chars=%s)",
+                    len(chat_template),
+                    chat_template[:100] if len(chat_template) > 100 else chat_template,
+                )
+            else:
+                logger.warning(
+                    "OpenCUA chat_template loaded (type=%s)",
+                    type(chat_template).__name__,
+                )
+
             # Optionally inject system prompt from environment variable
             import os
 
