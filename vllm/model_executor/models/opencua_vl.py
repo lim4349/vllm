@@ -1974,32 +1974,29 @@ class OpenCUA_VLForConditionalGeneration(
                 h // spatial_merge_size,
                 w // spatial_merge_size,
             )
-            # text_len includes text tokens from st to ed
-            # (ed is <|media_placeholder|> position in input_tokens)
-            # In actual sequence, placeholder is replaced by visual embeddings,
-            # so actual text tokens are from st to ed-1
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
-            # Text tokens: 1D sequential positions
-            # text_len includes <|media_placeholder|> in input_tokens,
-            # but in actual sequence it's replaced by visual embeddings,
-            # so text positions exclude the placeholder
-            actual_text_len = text_len - 1
-            text_positions = torch.arange(actual_text_len) + st_idx
-            llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
+            # Text tokens: 1D sequential positions (all dimensions same)
+            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
+            text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            llm_pos_ids_list.append(text_positions)
 
             # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after actual text tokens
+            # Position starts after text tokens (including placeholder)
+            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
             visual_positions = (
-                torch.arange(num_visual_tokens) + actual_text_len + st_idx
+                torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
+                + text_len
+                + st_idx
             )
-            llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
+            llm_pos_ids_list.append(visual_positions)
 
-            # Skip the single <|media_placeholder|> token in input_tokens
-            # (it will be replaced by num_visual_tokens visual embeddings)
+            # Skip the placeholder token in input_tokens
+            # (placeholder is replaced by num_visual_tokens visual embeddings
+            # in actual sequence)
             st = ed + 1
 
         if st < len(input_tokens):
