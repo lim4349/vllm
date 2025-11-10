@@ -10,24 +10,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 
 
 class OpenCUA_VLConfig(PretrainedConfig):
-    """Configuration class for OpenCUA-VL model.
-
-    This configuration follows the HuggingFace OpenCUAConfig structure
-    with additional vLLM-specific attributes for proper integration.
-
-    Args:
-        vision_config: Configuration for the vision model (Qwen2_5_VLVisionConfig)
-        text_config: Configuration for the text model (Qwen2Config)
-        ignore_index: The token ID to use for ignoring during loss calculation
-        media_placeholder_token_id: The token ID for <|media_placeholder|>
-        pad_token_id: The token ID to use for padding
-        image_token_id: The token ID for image placeholder (vLLM-specific)
-        video_token_id: The token ID for video placeholder (vLLM-specific)
-        vision_start_token_id: The token ID for <|media_begin|> (vLLM-specific)
-        vision_end_token_id: The token ID for <|media_end|> (vLLM-specific)
-        use_1d_rope: Whether to use 1D RoPE instead of M-RoPE (vLLM-specific)
-    """
-
     model_type = "opencua"
 
     def __init__(
@@ -37,34 +19,89 @@ class OpenCUA_VLConfig(PretrainedConfig):
         ignore_index: int = -100,
         media_placeholder_token_id: int = 151664,
         pad_token_id: int = 0,
-        # vLLM-specific additional attributes
+        # vLLM-specific
         image_token_id: int = 151664,
         video_token_id: int = 151664,
         vision_start_token_id: int = 151661,
         vision_end_token_id: int = 151663,
         use_1d_rope: bool = True,
+        # 1D RoPE 하이퍼 (필요시 모델에서 사용)
+        rope_base: int = 10000,
+        rope_scale: float = 1.0,
+        # OpenCUA alias (HF와 키가 다를 때 보전)
+        spatial_patch_size: int | None = None,
+        spatial_merge_size: int | None = None,
+        max_pixels: int | None = None,
         **kwargs,
     ):
-        # Initialize vision config (HF structure)
+        # Vision/Text config 기본값 안전화
         if isinstance(vision_config, dict):
             vision_config = Qwen2_5_VLVisionConfig(**vision_config)
+        if vision_config is None:
+            vision_config = Qwen2_5_VLVisionConfig()
         self.vision_config = vision_config
 
-        # Initialize text config (HF structure)
         if isinstance(text_config, dict):
             text_config = Qwen2Config(**text_config)
+        if text_config is None:
+            text_config = Qwen2Config()
         self.text_config = text_config
 
-        # HF standard attributes
+        # HF 표준
         self.ignore_index = ignore_index
         self.media_placeholder_token_id = media_placeholder_token_id
 
-        # vLLM-specific additional attributes
+        # vLLM 확장
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
         self.use_1d_rope = use_1d_rope
+        self.rope_base = rope_base
+        self.rope_scale = rope_scale
 
-        # Call parent constructor
+        # OpenCUA alias 보전 (vision_config에서 가져오거나 인자 우선)
+        vc = self.vision_config
+        self.spatial_patch_size = (
+            spatial_patch_size
+            if spatial_patch_size is not None
+            else getattr(vc, "spatial_patch_size", getattr(vc, "patch_size", 14))
+        )
+        self.spatial_merge_size = (
+            spatial_merge_size
+            if spatial_merge_size is not None
+            else getattr(vc, "spatial_merge_size", getattr(vc, "merge_size", 2))
+        )
+        self.max_pixels = (
+            max_pixels if max_pixels is not None else getattr(vc, "max_pixels", None)
+        )
+
+        # 간단 validation
+        for k in [
+            "media_placeholder_token_id",
+            "image_token_id",
+            "vision_start_token_id",
+            "vision_end_token_id",
+        ]:
+            v = getattr(self, k)
+            if not (isinstance(v, int) and v >= 0):
+                raise ValueError(f"{k} invalid: {v}")
+
         super().__init__(pad_token_id=pad_token_id, **kwargs)
+
+    # (선택) 런타임 토크나이저 동기화를 쉽게 하는 helper
+    def sync_special_token_ids(self, tokenizer):
+        get = tokenizer.convert_tokens_to_ids
+        mp = get("<|media_placeholder|>")
+        mb = get("<|media_begin|>")
+        me = get("<|media_end|>")
+        if mp is not None and mp >= 0:
+            self.media_placeholder_token_id = mp
+            self.image_token_id = mp
+        if mb is not None and mb >= 0:
+            self.vision_start_token_id = mb
+        if me is not None and me >= 0:
+            self.vision_end_token_id = me
+        # pad가 정의돼 있으면 패드도 동기화
+        if getattr(tokenizer, "pad_token_id", None) is not None:
+            self.pad_token_id = tokenizer.pad_token_id
