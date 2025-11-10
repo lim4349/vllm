@@ -1762,7 +1762,7 @@ class OpenCUA_VLForConditionalGeneration(
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw_list, rope_type="rope_1d"
+                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
                     )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -1796,7 +1796,7 @@ class OpenCUA_VLForConditionalGeneration(
                         self.visual,
                         pixel_values_videos,
                         grid_thw_list,
-                        rope_type="rope_1d",
+                        rope_type="rope_3d",
                     )
                 else:
                     video_embeds = self.visual(
