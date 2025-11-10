@@ -1578,7 +1578,27 @@ class OpenCUA_VLForConditionalGeneration(
             # Set rope_scaling to enable M-RoPE position calculation
             # (get_mrope_input_positions will use 1D sequential positions)
             if "rope_scaling" not in text_config_dict:
-                text_config_dict["rope_scaling"] = {"type": "mrope_section"}
+                # Calculate mrope_section for 1D RoPE
+                # For 1D RoPE, we split rotary_dim equally across T, H, W
+                # This ensures MRotaryEmbedding is created and can handle 3D positions
+                # with all dimensions having the same value (1D sequential positions)
+                head_dim = text_config_dict.get(
+                    "head_dim",
+                    text_config_dict["hidden_size"]
+                    // text_config_dict["num_attention_heads"],
+                )
+                rotary_dim = head_dim
+                # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
+                section_size = (rotary_dim // 2) // 3
+                remainder = (rotary_dim // 2) % 3
+                mrope_section = [section_size] * 3
+                # Distribute remainder to first dimensions
+                for i in range(remainder):
+                    mrope_section[i] += 1
+                text_config_dict["rope_scaling"] = {
+                    "rope_type": "default",
+                    "mrope_section": mrope_section,
+                }
             text_config = Qwen2Config(**text_config_dict)
 
         self.language_model = init_vllm_registered_model(
