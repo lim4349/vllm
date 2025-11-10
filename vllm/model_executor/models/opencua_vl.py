@@ -1323,6 +1323,8 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 processor.chat_template = modified_chat_template
             else:
                 processor.chat_template = chat_template
+        else:
+            logger.warning("OpenCUA chat_template not found.")
 
         # Validate all required special tokens exist and are not UNK
         im_tokens = ["<|im_user|>", "<|im_assistant|>", "<|im_end|>"]
