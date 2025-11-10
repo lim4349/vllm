@@ -283,20 +283,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        logger.warning(
-            "GPUModelRunner: uses_mrope=%s, model_config.uses_mrope=%s, "
-            "hf_config.rope_scaling=%s",
-            self.uses_mrope,
-            model_config.uses_mrope,
-            getattr(model_config.hf_config, "rope_scaling", None),
-        )
-        if hasattr(model_config.hf_config, "get_text_config"):
-            text_config = model_config.hf_config.get_text_config()
-            if text_config:
-                logger.warning(
-                    "GPUModelRunner: text_config.rope_scaling=%s",
-                    getattr(text_config, "rope_scaling", None),
-                )
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -709,18 +695,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.requests[req_id] = req_state
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            logger.warning(
-                "GPUModelRunner.add_request: uses_mrope=%s, req_id=%s",
-                self.uses_mrope,
-                req_id,
-            )
             if self.uses_mrope:
-                logger.warning("GPUModelRunner: calling _init_mrope_positions")
                 self._init_mrope_positions(req_state)
-            else:
-                logger.warning(
-                    "GPUModelRunner: skipping _init_mrope_positions (uses_mrope=False)"
-                )
 
             reqs_to_add.append(req_state)
 
@@ -882,7 +858,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
-        logger.warning("GPUModelRunner._init_mrope_positions called")
         image_grid_thw = []
         video_grid_thw = []
         second_per_grid_ts = []
@@ -904,20 +879,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
-        logger.warning(
-            "GPUModelRunner._init_mrope_positions: image_grid_thw=%s, "
-            "video_grid_thw=%s, prompt_token_ids_len=%d",
-            image_grid_thw,
-            video_grid_thw,
-            len(req_state.prompt_token_ids),
-        )
-
         assert supports_mrope(self.get_model()), "M-RoPE support is not implemented."
 
-        logger.warning(
-            "GPUModelRunner._init_mrope_positions: "
-            "calling model.get_mrope_input_positions"
-        )
         req_state.mrope_positions, req_state.mrope_position_delta = (
             self.model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
@@ -928,11 +891,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 audio_feature_lengths=audio_feature_lengths,
                 use_audio_in_video=use_audio_in_video,
             )
-        )
-        logger.warning(
-            "GPUModelRunner._init_mrope_positions: result shape=%s, delta=%d",
-            req_state.mrope_positions.shape,
-            req_state.mrope_position_delta,
         )
 
     def _extract_mm_kwargs(

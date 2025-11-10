@@ -1380,7 +1380,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # Use Qwen2.5-VL's approach: get token IDs from processor's
         # image_token/video_token strings
         # This matches what Qwen2VLDummyInputsBuilder generates
-        logger.warning("OpenCUA _get_prompt_updates called")
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -1533,7 +1532,6 @@ class OpenCUA_VLForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        logger.warning("OpenCUA_VLForConditionalGeneration.__init__ called")
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1582,11 +1580,6 @@ class OpenCUA_VLForConditionalGeneration(
 
         # Use text_config for language model initialization
         # (Qwen2ForCausalLM expects Qwen2Config, not OpenCUA_VLConfig)
-        logger.warning(
-            "OpenCUA_VLForConditionalGeneration.__init__: checking text_config, "
-            "config.text_config=%s",
-            getattr(config, "text_config", None),
-        )
         text_config = getattr(config, "text_config", None)
         if text_config is None:
             # If text_config is not set, create one from the main config
@@ -1615,10 +1608,6 @@ class OpenCUA_VLForConditionalGeneration(
         # (get_mrope_input_positions will use 1D sequential positions)
         # Check if rope_scaling needs to be set (even if text_config exists)
         rope_scaling = getattr(text_config, "rope_scaling", None)
-        logger.warning(
-            "OpenCUA rope_scaling check: text_config.rope_scaling=%s",
-            rope_scaling,
-        )
         if (
             rope_scaling is None
             or not isinstance(rope_scaling, dict)
@@ -1643,20 +1632,6 @@ class OpenCUA_VLForConditionalGeneration(
                 "rope_type": "default",
                 "mrope_section": mrope_section,
             }
-            logger.warning(
-                "OpenCUA mrope_section created: head_dim=%d, rotary_dim=%d, "
-                "mrope_section=%s (sum=%d, expected=%d)",
-                head_dim,
-                rotary_dim,
-                mrope_section,
-                sum(mrope_section),
-                rotary_dim // 2,
-            )
-        else:
-            logger.warning(
-                "OpenCUA mrope_section from existing rope_scaling: %s",
-                rope_scaling,
-            )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -1935,15 +1910,6 @@ class OpenCUA_VLForConditionalGeneration(
         OpenCUA uses 1D RoPE instead of M-RoPE, so all position dimensions
         (T, H, W) are set to the same 1D sequential position value.
         """
-        logger.warning(
-            "OpenCUA get_mrope_input_positions called: input_tokens_len=%d, "
-            "image_grid_thw=%s, video_grid_thw=%s, context_len=%d, seq_len=%s",
-            len(input_tokens),
-            image_grid_thw,
-            video_grid_thw,
-            context_len,
-            seq_len,
-        )
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
@@ -2032,23 +1998,6 @@ class OpenCUA_VLForConditionalGeneration(
             )
             llm_pos_ids_list.append(visual_positions.view(1, -1).expand(3, -1))
 
-            # Debug: log position ranges for validation
-            logger.warning(
-                "OpenCUA position debug: text_len=%d, actual_text_len=%d, "
-                "num_visual_tokens=%d, st_idx=%d, "
-                "text_positions=[%d..%d], visual_positions=[%d..%d], "
-                "llm_pos_ids_list_len=%d",
-                text_len,
-                actual_text_len,
-                num_visual_tokens,
-                st_idx,
-                text_positions[0].item() if len(text_positions) > 0 else -1,
-                text_positions[-1].item() if len(text_positions) > 0 else -1,
-                visual_positions[0].item() if len(visual_positions) > 0 else -1,
-                visual_positions[-1].item() if len(visual_positions) > 0 else -1,
-                len(llm_pos_ids_list),
-            )
-
             # Skip the single <|media_placeholder|> token in input_tokens
             # (it will be replaced by num_visual_tokens visual embeddings)
             st = ed + 1
@@ -2062,25 +2011,6 @@ class OpenCUA_VLForConditionalGeneration(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
-
-        logger.warning(
-            "OpenCUA get_mrope_input_positions result: llm_positions.shape=%s, "
-            "mrope_position_delta=%d, context_len=%d, seq_len=%s, "
-            "llm_positions[0, :5]=%s, llm_positions[1, :5]=%s, llm_positions[2, :5]=%s",
-            llm_positions.shape,
-            mrope_position_delta,
-            context_len,
-            seq_len,
-            llm_positions[0, :5].tolist()
-            if llm_positions.shape[1] >= 5
-            else llm_positions[0, :].tolist(),
-            llm_positions[1, :5].tolist()
-            if llm_positions.shape[1] >= 5
-            else llm_positions[1, :].tolist(),
-            llm_positions[2, :5].tolist()
-            if llm_positions.shape[1] >= 5
-            else llm_positions[2, :].tolist(),
-        )
 
         return llm_positions, mrope_position_delta
 
