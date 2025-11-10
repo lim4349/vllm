@@ -986,6 +986,34 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 # Convert to OpenCUA_VLConfig if it's a different config
                 config_dict = config.to_dict()
                 config = OpenCUA_VLConfig.from_dict(config_dict)
+
+        # Ensure text_config has rope_scaling with mrope_section for uses_mrope
+        text_config = config.get_text_config()
+        if text_config:
+            rope_scaling = getattr(text_config, "rope_scaling", None)
+            if (
+                rope_scaling is None
+                or not isinstance(rope_scaling, dict)
+                or "mrope_section" not in rope_scaling
+            ):
+                # Calculate mrope_section for 1D RoPE
+                head_dim = getattr(text_config, "head_dim", None)
+                if head_dim is None:
+                    head_dim = (
+                        text_config.hidden_size // text_config.num_attention_heads
+                    )
+                rotary_dim = head_dim
+                # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
+                section_size = (rotary_dim // 2) // 3
+                remainder = (rotary_dim // 2) % 3
+                mrope_section = [section_size] * 3
+                # Distribute remainder to first dimensions
+                for i in range(remainder):
+                    mrope_section[i] += 1
+                text_config.rope_scaling = {
+                    "rope_type": "default",
+                    "mrope_section": mrope_section,
+                }
         return config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:

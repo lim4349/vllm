@@ -89,6 +89,10 @@ class OpenCUA_VLConfig(PretrainedConfig):
 
         super().__init__(pad_token_id=pad_token_id, **kwargs)
 
+    def get_text_config(self) -> Qwen2Config:
+        """Get the text config for this multimodal model."""
+        return self.text_config
+
     # (선택) 런타임 토크나이저 동기화를 쉽게 하는 helper
     def sync_special_token_ids(self, tokenizer):
         get = tokenizer.convert_tokens_to_ids
