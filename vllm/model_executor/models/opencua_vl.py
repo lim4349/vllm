@@ -1323,6 +1323,26 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 processor.chat_template = modified_chat_template
             else:
                 processor.chat_template = chat_template
+
+            # Also set chat_template on tokenizer for vLLM's resolve_hf_chat_template
+            # This ensures the chat template is used even if processor is cached
+            if hasattr(opencua_tokenizer, "chat_template"):
+                if isinstance(chat_template, str):
+                    opencua_tokenizer.chat_template = chat_template
+                else:
+                    # If it's a callable, wrap it for tokenizer
+                    def tokenizer_chat_template(messages, tokenizer, **kwargs):
+                        if callable(chat_template):
+                            return chat_template(messages, tokenizer, **kwargs)
+                        else:
+                            return tokenizer.apply_chat_template(
+                                messages,
+                                tokenizer=tokenizer,
+                                chat_template=chat_template,
+                                **kwargs,
+                            )
+
+                    opencua_tokenizer.chat_template = tokenizer_chat_template
         else:
             logger.warning("OpenCUA chat_template not found.")
 
