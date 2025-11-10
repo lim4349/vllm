@@ -1580,55 +1580,55 @@ class OpenCUA_VLForConditionalGeneration(
                     "use_1d_rope",
                 ]
             }
-            # OpenCUA uses 1D RoPE, but implements SupportsMRoPE interface
-            # Set rope_scaling to enable M-RoPE position calculation
-            # (get_mrope_input_positions will use 1D sequential positions)
-            logger.warning(
-                "OpenCUA rope_scaling check: rope_scaling in text_config_dict=%s",
-                "rope_scaling" in text_config_dict,
-            )
-            if "rope_scaling" in text_config_dict:
-                logger.warning(
-                    "OpenCUA rope_scaling already exists: %s",
-                    text_config_dict["rope_scaling"],
-                )
-            if "rope_scaling" not in text_config_dict:
-                # Calculate mrope_section for 1D RoPE
-                # For 1D RoPE, we split rotary_dim equally across T, H, W
-                # This ensures MRotaryEmbedding is created and can handle 3D positions
-                # with all dimensions having the same value (1D sequential positions)
-                head_dim = text_config_dict.get(
-                    "head_dim",
-                    text_config_dict["hidden_size"]
-                    // text_config_dict["num_attention_heads"],
-                )
-                rotary_dim = head_dim
-                # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
-                section_size = (rotary_dim // 2) // 3
-                remainder = (rotary_dim // 2) % 3
-                mrope_section = [section_size] * 3
-                # Distribute remainder to first dimensions
-                for i in range(remainder):
-                    mrope_section[i] += 1
-                text_config_dict["rope_scaling"] = {
-                    "rope_type": "default",
-                    "mrope_section": mrope_section,
-                }
-                logger.warning(
-                    "OpenCUA mrope_section created: head_dim=%d, rotary_dim=%d, "
-                    "mrope_section=%s (sum=%d, expected=%d)",
-                    head_dim,
-                    rotary_dim,
-                    mrope_section,
-                    sum(mrope_section),
-                    rotary_dim // 2,
-                )
-            else:
-                logger.warning(
-                    "OpenCUA mrope_section from existing rope_scaling: %s",
-                    text_config_dict["rope_scaling"],
-                )
             text_config = Qwen2Config(**text_config_dict)
+
+        # OpenCUA uses 1D RoPE, but implements SupportsMRoPE interface
+        # Set rope_scaling to enable M-RoPE position calculation
+        # (get_mrope_input_positions will use 1D sequential positions)
+        # Check if rope_scaling needs to be set (even if text_config exists)
+        rope_scaling = getattr(text_config, "rope_scaling", None)
+        logger.warning(
+            "OpenCUA rope_scaling check: text_config.rope_scaling=%s",
+            rope_scaling,
+        )
+        if (
+            rope_scaling is None
+            or not isinstance(rope_scaling, dict)
+            or "mrope_section" not in rope_scaling
+        ):
+            # Calculate mrope_section for 1D RoPE
+            # For 1D RoPE, we split rotary_dim equally across T, H, W
+            # This ensures MRotaryEmbedding is created and can handle 3D positions
+            # with all dimensions having the same value (1D sequential positions)
+            head_dim = getattr(text_config, "head_dim", None)
+            if head_dim is None:
+                head_dim = text_config.hidden_size // text_config.num_attention_heads
+            rotary_dim = head_dim
+            # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
+            section_size = (rotary_dim // 2) // 3
+            remainder = (rotary_dim // 2) % 3
+            mrope_section = [section_size] * 3
+            # Distribute remainder to first dimensions
+            for i in range(remainder):
+                mrope_section[i] += 1
+            text_config.rope_scaling = {
+                "rope_type": "default",
+                "mrope_section": mrope_section,
+            }
+            logger.warning(
+                "OpenCUA mrope_section created: head_dim=%d, rotary_dim=%d, "
+                "mrope_section=%s (sum=%d, expected=%d)",
+                head_dim,
+                rotary_dim,
+                mrope_section,
+                sum(mrope_section),
+                rotary_dim // 2,
+            )
+        else:
+            logger.warning(
+                "OpenCUA mrope_section from existing rope_scaling: %s",
+                rope_scaling,
+            )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
