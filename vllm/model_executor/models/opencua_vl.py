@@ -1677,14 +1677,33 @@ class OpenCUA_VLForConditionalGeneration(
             )
             # visual_positions start after text_len tokens
             # This matches Qwen2.5-VL logic: visual_positions = positions + text_len + st_idx
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
             visual_positions = (
                 torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
+            
+            # Logging
+            logger.info(
+                "OpenCUA MRoPE visual - visual_positions shape: %s, "
+                "visual_positions min: %d, max: %d, num_visual_tokens: %d",
+                str(visual_positions.shape),
+                visual_positions.min().item(),
+                visual_positions.max().item(),
+                num_visual_tokens,
+            )
+            
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
             # num_visual_tokens tokens. The next text starts after these visual tokens.
             # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
-            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            
+            # Logging
+            logger.info(
+                "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
+                "st before: %d, st after: %d",
+                ed, num_visual_tokens, st, ed + num_visual_tokens,
+            )
+            
             st = ed + num_visual_tokens
 
         if st < len(input_tokens):
@@ -1694,6 +1713,16 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        
+        # Logging before calculating delta
+        logger.info(
+            "OpenCUA MRoPE before delta - llm_positions shape: %s, "
+            "llm_positions.max(): %d, input_tokens len: %d",
+            str(llm_positions.shape),
+            llm_positions.max().item(),
+            len(input_tokens),
+        )
+        
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
         
