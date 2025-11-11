@@ -2066,13 +2066,15 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(text_positions)
 
             # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after text tokens (including placeholder)
+            # Position starts after text tokens (placeholder replaced by visual)
             # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
-            # Match Qwen2.5-VL: visual position = text_len + st_idx
+            # Original OpenCUA: visual position starts from st_idx + text_len - 1
+            # (placeholder position is replaced, so visual starts after it)
+            visual_start_pos = st_idx + text_len - 1
             visual_positions = (
                 torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
-                + text_len
-                + st_idx
+                + visual_start_pos
+                + 1
             )
             llm_pos_ids_list.append(visual_positions)
 
