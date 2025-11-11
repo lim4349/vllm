@@ -661,6 +661,28 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
 
+        # Validate window size configuration for window attention
+        # vit_merger_window_size = (window_size // patch_size) // spatial_merge_size
+        # Must be at least 1 and window_size must be divisible by
+        # patch_size * spatial_merge_size
+        patch_merge_product = self.patch_size * self.spatial_merge_size
+        if self.window_size % patch_merge_product != 0:
+            raise ValueError(
+                f"window_size ({self.window_size}) must be divisible by "
+                f"patch_size * spatial_merge_size ({patch_merge_product}) "
+                f"for correct window attention boundary alignment."
+            )
+        vit_merger_window_size = (
+            self.window_size // self.patch_size
+        ) // self.spatial_merge_size
+        if vit_merger_window_size < 1:
+            raise ValueError(
+                f"vit_merger_window_size ({vit_merger_window_size}) "
+                f"must be at least 1. Check window_size ({self.window_size}), "
+                f"patch_size ({self.patch_size}), and "
+                f"spatial_merge_size ({self.spatial_merge_size}) configuration."
+            )
+
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
@@ -747,6 +769,7 @@ class OpenCUA_VisionTransformer(nn.Module):
         """
         # Window size conversion: (window_size // patch_size) // spatial_merge_size
         # This order is critical for correct boundary alignment
+        # Validation is done in __init__ to ensure vit_merger_window_size >= 1
         vit_merger_window_size = (
             self.window_size // self.patch_size
         ) // self.spatial_merge_size
@@ -911,6 +934,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         reverse_indices = self.invert_permutation(window_index)
         cu_window_seqlens = torch.cat(cu_window_seqlens)
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        # Add leading 0 padding for cu_window_seqlens to match cu_seqlens format
+        # This is critical for correct token boundary calculation in window attention
+        cu_window_seqlens = F.pad(cu_window_seqlens, (1, 0), "constant", 0)
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
