@@ -802,9 +802,19 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb = []
         cu_seqlens: list = []
 
+        logger = init_logger(__name__)
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
             rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
+            
+            # Logging
+            logger.info(
+                "OpenCUA VisionTransformer 1D RoPE - grid_thw: [%d, %d, %d], "
+                "rotary_pos_emb_1d shape: %s, cu_seqlens_1d: %s",
+                t, h, w,
+                str(rotary_pos_emb_1d.shape),
+                str(cu_seqlens_1d),
+            )
 
             rotary_pos_emb.append(rotary_pos_emb_1d)
             cu_seqlens.append(cu_seqlens_1d)
@@ -813,6 +823,15 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+        
+        # Logging
+        logger.info(
+            "OpenCUA VisionTransformer - rotary_pos_emb shape: %s, "
+            "cu_seqlens: %s, hidden_states shape: %s",
+            str(rotary_pos_emb.shape),
+            str(cu_seqlens),
+            str(hidden_states.shape),
+        )
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
@@ -834,6 +853,14 @@ class OpenCUA_VisionTransformer(nn.Module):
         # [seq_len, 1, context_dim] -> [seq_len, context_dim]
         hidden_states = hidden_states.squeeze(1)
         hidden_states = self.merger(hidden_states, grid_thw=grid_thw)
+        
+        # Logging
+        logger.info(
+            "OpenCUA VisionTransformer output - shape: %s, dtype: %s",
+            str(hidden_states.shape),
+            str(hidden_states.dtype),
+        )
+        
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1238,10 +1265,28 @@ class OpenCUA_VLForConditionalGeneration(
                 config.sync_special_token_ids(tokenizer)
                 logger.info(
                     "OpenCUA token IDs synced with tokenizer - "
-                    "media_placeholder_token_id: %d, pad_token_id: %d",
+                    "media_placeholder_token_id: %d, pad_token_id: %d, "
+                    "image_token_id: %d, video_token_id: %d",
                     config.media_placeholder_token_id,
                     getattr(config, "pad_token_id", 0),
+                    getattr(config, "image_token_id", -1),
+                    getattr(config, "video_token_id", -1),
                 )
+                # Check tokenizer vocab
+                try:
+                    vocab = tokenizer.get_vocab()
+                    media_placeholder_str = tokenizer.convert_ids_to_tokens(
+                        [config.media_placeholder_token_id]
+                    )[0]
+                    logger.info(
+                        "OpenCUA tokenizer check - media_placeholder token: '%s' (id: %d), "
+                        "vocab size: %d",
+                        media_placeholder_str,
+                        config.media_placeholder_token_id,
+                        len(vocab),
+                    )
+                except Exception as e:
+                    logger.warning("Could not check tokenizer vocab: %s", e)
             except Exception as e:
                 logger.warning(
                     "Could not sync token IDs with tokenizer: %s. "
@@ -1508,6 +1553,7 @@ class OpenCUA_VLForConditionalGeneration(
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
+        logger = init_logger(__name__)
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
@@ -1518,6 +1564,20 @@ class OpenCUA_VLForConditionalGeneration(
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        
+        # Logging
+        logger.info(
+            "OpenCUA MRoPE positions - input_tokens len: %d, "
+            "image_nums: %d, video_nums: %d, "
+            "image_token_id: %d, video_token_id: %d, "
+            "spatial_merge_size: %d",
+            len(input_tokens),
+            len(image_grid_thw) if image_grid_thw else 0,
+            len(video_grid_thw) if video_grid_thw else 0,
+            image_token_id,
+            video_token_id,
+            spatial_merge_size,
+        )
 
         # OpenCUA uses Kimi-VL style: only <|media_placeholder|> token,
         # no vision_start/end tokens
@@ -1581,6 +1641,13 @@ class OpenCUA_VLForConditionalGeneration(
             # The placeholder token at position ed will be replaced with visual tokens
             text_len = ed - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            
+            # Logging
+            logger.info(
+                "OpenCUA MRoPE segment - st: %d, ed: %d, text_len: %d, "
+                "grid_thw: [%d, %d, %d], llm_grid: [%d, %d, %d], st_idx: %d",
+                st, ed, text_len, t, h, w, llm_grid_t, llm_grid_h, llm_grid_w, st_idx
+            )
             if text_len > 0:
                 text_positions = (
                     torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
@@ -1629,6 +1696,16 @@ class OpenCUA_VLForConditionalGeneration(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
+        
+        # Logging
+        logger.info(
+            "OpenCUA MRoPE final - llm_positions shape: %s, "
+            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
+            str(llm_positions.shape),
+            mrope_position_delta,
+            context_len,
+            seq_len,
+        )
 
         return llm_positions, mrope_position_delta
 
