@@ -900,6 +900,14 @@ class OpenCUA_VisionTransformer(nn.Module):
             cu_seqlens = cu_seqlens * self.spatial_merge_unit
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
+        # 시퀀셜 인덱싱 사용 시 cu_window_seqlens도 spatial_merge_unit로 스케일링 필요
+        # window attention 블록에서 올바른 sequence length를 사용하기 위해
+        # cu_window_seqlens가 이미 스케일링되어 있는지 확인
+        # 시퀀셜 인덱싱의 경우 cu_seqlens와 동일한 스케일이어야 함
+        if len(cu_window_seqlens) > 1 and cu_window_seqlens[-1].item() < seq_len:
+            # 스케일링이 안 되어 있으면 스케일링
+            cu_window_seqlens = cu_window_seqlens * self.spatial_merge_unit
+
         # 배치 차원 추가
         hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
 
