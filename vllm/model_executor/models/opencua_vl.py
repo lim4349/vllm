@@ -19,34 +19,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
-
-# Import Qwen2.5-VL components dynamically to avoid import issues
-try:
-    from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
-    from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-        Qwen2_5_VLConfig,
-        Qwen2_5_VLVisionConfig,
-    )
-except ImportError:
-    # Fallback: create minimal classes
-    from transformers import PretrainedConfig, ProcessorMixin
-
-    class Qwen2_5_VLProcessor(ProcessorMixin):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
-    class Qwen2_5_VLConfig(PretrainedConfig):
-        model_type = "qwen2_5_vl"
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
-    class Qwen2_5_VLVisionConfig(PretrainedConfig):
-        model_type = "qwen2_5_vl_vision"
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
+from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
+    Qwen2_5_VLConfig,
+    Qwen2_5_VLVisionConfig,
+)
 
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import (
@@ -57,7 +34,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -107,8 +83,6 @@ from .vision import (
     get_vit_attn_backend,
     run_dp_sharded_mrope_vision_model,
 )
-
-logger = init_logger(__name__)
 
 # === Vision Inputs === #
 
@@ -658,33 +632,7 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.window_size = vision_config.window_size
         self.patch_size = vision_config.patch_size
         self.spatial_merge_size = vision_config.spatial_merge_size
-        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
-        # Flag to control cu_seqlens scaling for full attention path
-        # If True, cu_seqlens needs to be scaled by spatial_merge_unit
-        self.full_cu_is_unmerged = True
-
-        # Validate window size configuration for window attention
-        # vit_merger_window_size = (window_size // patch_size) // spatial_merge_size
-        # Must be at least 1 and window_size must be divisible by
-        # patch_size * spatial_merge_size
-        patch_merge_product = self.patch_size * self.spatial_merge_size
-        if self.window_size % patch_merge_product != 0:
-            raise ValueError(
-                f"window_size ({self.window_size}) must be divisible by "
-                f"patch_size * spatial_merge_size ({patch_merge_product}) "
-                f"for correct window attention boundary alignment."
-            )
-        vit_merger_window_size = (
-            self.window_size // self.patch_size
-        ) // self.spatial_merge_size
-        if vit_merger_window_size < 1:
-            raise ValueError(
-                f"vit_merger_window_size ({vit_merger_window_size}) "
-                f"must be at least 1. Check window_size ({self.window_size}), "
-                f"patch_size ({self.patch_size}), and "
-                f"spatial_merge_size ({self.spatial_merge_size}) configuration."
-            )
 
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
@@ -695,8 +643,6 @@ class OpenCUA_VisionTransformer(nn.Module):
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
-        # Use 1D RoPE instead of M-RoPE
-        # Load rope_theta from vision_config if available, otherwise use default
         rope_theta = getattr(vision_config, "rope_theta", 10000.0)
         self.rotary_pos_emb = OpenCUA_VisionRotaryEmbedding(
             head_dim // 2, theta=rope_theta
@@ -760,47 +706,21 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rotary_pos_emb_1d(self, seq_len: int):
-        """Use 1D RoPE instead of 3D M-RoPE"""
         return self.rotary_pos_emb(seq_len)
-
-    def get_window_index_1d(self, grid_t, grid_h, grid_w):
-        """Simple sequential indexing for 1D RoPE.
-
-        OpenCUA uses simple sequential indexing without window structure
-        for correct Korean output.
-        """
-        llm_grid_h = grid_h // self.spatial_merge_size
-        llm_grid_w = grid_w // self.spatial_merge_size
-        num_tokens = grid_t * llm_grid_h * llm_grid_w
-        index = torch.arange(num_tokens)
-        # For sequential indexing, cu_seqlens should be in merge units
-        # to match the actual sequence length after merge
-        cu_seqlens = torch.tensor(
-            [num_tokens * self.spatial_merge_unit], dtype=torch.int32
-        )
-        return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
-        """Get 1D RoPE embeddings for sequential indexing.
-
-        OpenCUA uses only sequential indexing, no window attention.
-        For 1D RoPE, each patch gets a unique sequential position (0, 1, 2, ...).
-        This preserves spatial information better than merge token grouping.
-        Shape: [t * h * w, head_dim // 2]
-        """
-        # seq_len after patch_embed is t * h * w (patch units)
-        seq_len_patch = t * h * w
-
-        # Generate 1D RoPE for sequential positions
-        # Each patch gets a unique sequential position
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(seq_len_patch)
-
-        # cu_seqlens_1d: number of patches per frame (h * w) in patch units
+        llm_grid_h = h // self.spatial_merge_size
+        llm_grid_w = w // self.spatial_merge_size
+        total_tokens = t * llm_grid_h * llm_grid_w
+        rotary_pos_emb_1d_full = self.rotary_pos_emb_1d(total_tokens)
+        rotary_pos_emb_1d = rotary_pos_emb_1d_full.unsqueeze(1).expand(
+            -1, self.spatial_merge_unit, -1
+        )
+        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
-
         return rotary_pos_emb_1d, cu_seqlens_1d
 
     def compute_attn_mask_seqlen(
@@ -836,57 +756,22 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb = []
         cu_seqlens: list = []
 
-        for idx, (t, h, w) in enumerate(grid_thw):
+        for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
-            # Verify grid_thw is in patch units
-            # (must be divisible by spatial_merge_size)
-            if h % self.spatial_merge_size != 0 or w % self.spatial_merge_size != 0:
-                raise ValueError(
-                    f"grid_thw[{idx}] values (h={h}, w={w}) must be in patch units, "
-                    f"but are not divisible by "
-                    f"spatial_merge_size={self.spatial_merge_size}. "
-                    f"This suggests grid_thw is in pixels instead of patches, "
-                    f"which will break token alignment and spatial structure."
-                )
-
             rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
 
             rotary_pos_emb.append(rotary_pos_emb_1d)
             cu_seqlens.append(cu_seqlens_1d)
 
-        rotary_pos_emb = torch.cat(rotary_pos_emb)  # [seq, ...]
+        rotary_pos_emb = torch.cat(rotary_pos_emb)
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
-        # cu_seqlens_1d is in patch units (h * w), and seq_len is also in patch units
-        # No scaling needed - both are in the same units
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
-        # Validation: cu_seqlens[-1] must match seq_len
-        if cu_seqlens[-1].item() != seq_len:
-            raise ValueError(
-                f"Sequence length mismatch: cu_seqlens[-1]={cu_seqlens[-1].item()} "
-                f"!= seq_len={seq_len}. Check cu_seqlens scaling."
-            )
-
-        # Validation: rotary_pos_emb shape must match seq_len
-        if rotary_pos_emb.shape[0] != seq_len:
-            raise ValueError(
-                f"RoPE shape mismatch: "
-                f"rotary_pos_emb.shape[0]={rotary_pos_emb.shape[0]} "
-                f"!= seq_len={seq_len}"
-            )
-
-        # 배치 차원 추가
-        hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
-
+        hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-
-        # 사전 계산 (보통 CPU int32 기대)
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
-
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-
-        # OpenCUA uses only full attention (sequential), no window attention
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
@@ -896,13 +781,9 @@ class OpenCUA_VisionTransformer(nn.Module):
                 seqlens=seqlens_full,
             )
 
-        # For OpenCUA-VL, float16 will overflow at last block
-        # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # merger & 출력
-        # [seq, 1, ctx_dim] -> [seq, ctx_dim]
         hidden_states = self.merger(hidden_states)
         return hidden_states
 
@@ -939,45 +820,8 @@ class OpenCUA_VisionTransformer(nn.Module):
 
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Cache for processor to avoid reloading
-        self._cached_processor: Qwen2_5_VLProcessor | None = None
-
     def get_hf_config(self):
-        # Try to get OpenCUA_VLConfig first
-        try:
-            config = self.ctx.get_hf_config(OpenCUA_VLConfig)
-        except TypeError:
-            # If the loaded config is OpenCUAConfig from the model repository,
-            # load it directly and add vLLM-specific attributes if needed
-            from transformers import AutoConfig
-
-            model_path = self.ctx.model_config.model
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            # If it's already OpenCUAConfig from HF, add vLLM-specific attributes
-            if hasattr(config, "model_type") and config.model_type == "opencua":
-                # Add vLLM-specific attributes if they don't exist
-                if not hasattr(config, "image_token_id"):
-                    config.image_token_id = getattr(
-                        config, "media_placeholder_token_id", 151664
-                    )
-                if not hasattr(config, "video_token_id"):
-                    config.video_token_id = getattr(
-                        config, "media_placeholder_token_id", 151664
-                    )
-                if not hasattr(config, "vision_start_token_id"):
-                    config.vision_start_token_id = 151661
-                if not hasattr(config, "vision_end_token_id"):
-                    config.vision_end_token_id = 151663
-                if not hasattr(config, "use_1d_rope"):
-                    config.use_1d_rope = True
-            else:
-                # Convert to OpenCUA_VLConfig if it's a different config
-                config_dict = config.to_dict()
-                config = OpenCUA_VLConfig.from_dict(config_dict)
-
-        # Ensure text_config has rope_scaling with mrope_section for uses_mrope
+        config = self.ctx.get_hf_config(OpenCUA_VLConfig)
         text_config = config.get_text_config()
         if text_config:
             rope_scaling = getattr(text_config, "rope_scaling", None)
@@ -986,18 +830,12 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 or not isinstance(rope_scaling, dict)
                 or "mrope_section" not in rope_scaling
             ):
-                # Calculate mrope_section for 1D RoPE
-                head_dim = getattr(text_config, "head_dim", None)
-                if head_dim is None:
-                    head_dim = (
-                        text_config.hidden_size // text_config.num_attention_heads
-                    )
-                rotary_dim = head_dim
-                # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
-                section_size = (rotary_dim // 2) // 3
-                remainder = (rotary_dim // 2) % 3
+                head_dim = getattr(text_config, "head_dim", None) or (
+                    text_config.hidden_size // text_config.num_attention_heads
+                )
+                section_size = (head_dim // 2) // 3
+                remainder = (head_dim // 2) % 3
                 mrope_section = [section_size] * 3
-                # Distribute remainder to first dimensions
                 for i in range(remainder):
                     mrope_section[i] += 1
                 text_config.rope_scaling = {
@@ -1007,376 +845,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         return config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # If max_pixels is provided in kwargs, update the cached
-        # processor's image_processor
-        if self._cached_processor is not None:
-            # If max_pixels is provided in kwargs, update the cached
-            # processor's image_processor
-            if "max_pixels" in kwargs and hasattr(
-                self._cached_processor, "image_processor"
-            ):
-                current_max = getattr(
-                    self._cached_processor.image_processor, "max_pixels", None
-                )
-                new_max = kwargs["max_pixels"]
-                if current_max is None or current_max < new_max:
-                    self._cached_processor.image_processor.max_pixels = new_max
-            return self._cached_processor
-
-        from transformers import AutoImageProcessor, AutoTokenizer
-
-        # OpenCUA model path - use OpenCUA's own preprocessor/tokenizer
-        model_path = self.ctx.model_config.model
-        use_fast = kwargs.pop("use_fast", True)
-
-        qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
-
-        # Priority 1: Try to load image processor from OpenCUA model path
-        opencua_image_processor = None
-        try:
-            opencua_image_processor = AutoImageProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                **kwargs,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to load OpenCUA image processor from %s: %s. "
-                "Will use Qwen2.5-VL processor.",
-                model_path,
-                e,
-            )
-
-        # Load Qwen2.5-VL processor (has min_pixels attribute required by vLLM)
-        processor = Qwen2_5_VLProcessor.from_pretrained(
-            qwen2_vl_base,
-            trust_remote_code=True,
-            use_fast=use_fast,
+        """Get processor from OpenCUA config."""
+        return self.ctx.get_hf_processor(
+            Qwen2_5_VLProcessor,
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
-        # Replace image processor with OpenCUA's if available
-        # OpenCUA image processor may not have min_pixels/max_pixels,
-        # but we should use it anyway
-        if opencua_image_processor is not None:
-            # If OpenCUA image processor doesn't have min_pixels/max_pixels,
-            # add them from Qwen2.5-VL processor
-            qwen_image_processor = processor.image_processor
-
-            # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels,
-            # 3) OpenCUA's max_pixels
-            target_max_pixels = None
-            if "max_pixels" in kwargs:
-                # Highest priority: use max_pixels from kwargs
-                # (e.g., from mm_processor_kwargs)
-                target_max_pixels = kwargs["max_pixels"]
-            elif hasattr(qwen_image_processor, "max_pixels"):
-                # Second priority: use Qwen2.5-VL processor's max_pixels
-                target_max_pixels = qwen_image_processor.max_pixels
-
-            if not hasattr(opencua_image_processor, "min_pixels") and hasattr(
-                qwen_image_processor, "min_pixels"
-            ):
-                opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
-
-            if target_max_pixels is not None:
-                if not hasattr(opencua_image_processor, "max_pixels"):
-                    opencua_image_processor.max_pixels = target_max_pixels
-                else:
-                    current_max = opencua_image_processor.max_pixels
-                    if current_max < target_max_pixels:
-                        opencua_image_processor.max_pixels = target_max_pixels
-            processor.image_processor = opencua_image_processor
-
-        # Load OpenCUA tokenizer (highest priority)
-        opencua_tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            use_fast=use_fast,
-        )
-
-        # Replace processor's tokenizer with OpenCUA tokenizer
-        processor.tokenizer = opencua_tokenizer
-
-        # Get OpenCUA config for token IDs
-        hf_config = self.get_hf_config()
-
-        vocab = opencua_tokenizer.get_vocab()
-        if "<|media_placeholder|>" not in vocab:
-            raise ValueError(
-                "<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
-                "This is required for proper text recognition."
-            )
-
-        media_placeholder_id = vocab["<|media_placeholder|>"]
-        eos_token_id = None
-        if (
-            hasattr(opencua_tokenizer, "eos_token_id")
-            and opencua_tokenizer.eos_token_id is not None
-        ):
-            eos_token_id = opencua_tokenizer.eos_token_id
-        elif hasattr(opencua_tokenizer, "eos_token") and opencua_tokenizer.eos_token:
-            eos_token_id = opencua_tokenizer.convert_tokens_to_ids(
-                opencua_tokenizer.eos_token
-            )
-
-        # Validate that image_token_id is not the same as EOS token ID
-        if (
-            hasattr(hf_config, "image_token_id")
-            and eos_token_id is not None
-            and hf_config.image_token_id == eos_token_id
-        ):
-            logger.error(
-                "Config image_token_id (%s) is EOS token ID! "
-                "This will cause serious issues. "
-                "Expected <|media_placeholder|> ID: %s, "
-                "EOS token ID: %s. "
-                "Auto-correcting to <|media_placeholder|> ID.",
-                hf_config.image_token_id,
-                media_placeholder_id,
-                eos_token_id,
-            )
-
-        # Validate that media_placeholder ID is not the same as EOS token ID
-        if eos_token_id is not None and media_placeholder_id == eos_token_id:
-            raise ValueError(
-                f"<|media_placeholder|> token ID ({media_placeholder_id}) "
-                f"is EOS token ID! "
-                f"This is a critical configuration error. "
-                f"EOS token ID: {eos_token_id}. "
-                f"Please check the tokenizer configuration."
-            )
-
-        # Sync config with actual token IDs from tokenizer
-        if hasattr(hf_config, "image_token_id"):
-            if hf_config.image_token_id != media_placeholder_id:
-                if (
-                    eos_token_id is not None
-                    and hf_config.image_token_id == eos_token_id
-                ):
-                    pass
-                else:
-                    logger.warning(
-                        "Config image_token_id (%s) != "
-                        "actual <|media_placeholder|> (%s). "
-                        "Updating config.",
-                        hf_config.image_token_id,
-                        media_placeholder_id,
-                    )
-            hf_config.image_token_id = media_placeholder_id
-            if hasattr(hf_config, "video_token_id"):
-                hf_config.video_token_id = media_placeholder_id
-
-        # Use the actual token ID (from vocab, not from config)
-        image_token_id = media_placeholder_id
-        video_token_id = media_placeholder_id
-
-        processor.image_token = "<|media_placeholder|>"
-        processor.video_token = "<|media_placeholder|>"
-
-        # Verify processor is NOT using wrong token names
-        if processor.image_token != "<|media_placeholder|>":
-            raise ValueError(
-                f"processor.image_token must be '<|media_placeholder|>', "
-                f"but got '{processor.image_token}'. "
-                f"This will break text recognition."
-            )
-
-        # Monkey patch _check_special_mm_tokens to use OpenCUA token IDs directly
-        def patched_check_special_mm_tokens(text, text_inputs, modalities=None):
-            """Patched version that uses OpenCUA config token IDs directly"""
-            if modalities is None:
-                modalities = ["image", "video"]
-
-            # Get input_ids tensor/list
-            input_ids = text_inputs["input_ids"]
-            if hasattr(input_ids, "tolist"):
-                input_ids_list = input_ids.tolist()
-                if isinstance(input_ids_list[0], list):
-                    input_ids_list = input_ids_list[0]
-            else:
-                input_ids_list = input_ids
-
-            for modality in modalities:
-                if modality == "image":
-                    token_id = image_token_id
-                elif modality == "video":
-                    token_id = video_token_id
-                else:
-                    continue
-
-                # Count occurrences in tokenized input_ids using config token ID
-                ids_count = input_ids_list.count(token_id)
-
-                if ids_count > 0:
-                    pass
-
-        # Apply the monkey patch
-        processor._check_special_mm_tokens = patched_check_special_mm_tokens
-
-        # Get OpenCUA chat template from OpenCUA tokenizer
-        chat_template = None
-        if (
-            hasattr(opencua_tokenizer, "chat_template")
-            and opencua_tokenizer.chat_template
-        ):
-            chat_template = opencua_tokenizer.chat_template
-        elif hasattr(opencua_tokenizer, "get_chat_template"):
-            try:
-                chat_template = opencua_tokenizer.get_chat_template()
-            except Exception as e:
-                logger.warning(
-                    "Failed to get chat_template from OpenCUA tokenizer: %s", e
-                )
-
-        # Set chat_template to processor
-        if chat_template:
-            # Optionally inject system prompt from environment variable
-            import os
-
-            system_prompt_env = os.getenv("OPENCUA_SYSTEM_PROMPT")
-            if system_prompt_env:
-                # Wrap chat_template to inject system prompt
-                original_template = chat_template
-
-                def modified_chat_template(messages, tokenizer, **kwargs):
-                    # Check if system message already exists
-                    has_system = messages and messages[0].get("role") == "system"
-
-                    if not has_system:
-                        # Prepend system message
-                        messages = [
-                            {"role": "system", "content": system_prompt_env}
-                        ] + messages
-
-                    # Use original template
-                    if callable(original_template):
-                        return original_template(
-                            messages, tokenizer=tokenizer, **kwargs
-                        )
-                    else:
-                        # If it's a string (Jinja template),
-                        # use tokenizer.apply_chat_template
-                        return tokenizer.apply_chat_template(
-                            messages,
-                            tokenizer=tokenizer,
-                            chat_template=original_template,
-                            **kwargs,
-                        )
-
-                processor.chat_template = modified_chat_template
-            else:
-                processor.chat_template = chat_template
-
-            # Also set chat_template on tokenizer for vLLM's resolve_hf_chat_template
-            # This ensures the chat template is used even if processor is cached
-            # Set on opencua_tokenizer (which is now processor.tokenizer)
-            if hasattr(opencua_tokenizer, "chat_template"):
-                if isinstance(chat_template, str):
-                    opencua_tokenizer.chat_template = chat_template
-                elif callable(chat_template):
-                    # If it's a callable, wrap it for tokenizer
-                    def tokenizer_chat_template(messages, tokenizer, **kwargs):
-                        return chat_template(messages, tokenizer, **kwargs)
-
-                    opencua_tokenizer.chat_template = tokenizer_chat_template
-
-            # Also set on ctx.tokenizer if it's different from opencua_tokenizer
-            # Note: ctx.tokenizer is frozen, so we can't modify it directly
-            # But processor.tokenizer is set to opencua_tokenizer, and
-            # resolve_hf_chat_template checks processor.chat_template first
-            # If ctx.tokenizer is the same object, it will already have chat_template
-            ctx_tokenizer = self.ctx.tokenizer
-            if ctx_tokenizer is not opencua_tokenizer and hasattr(
-                ctx_tokenizer, "chat_template"
-            ):
-                import contextlib
-
-                if isinstance(chat_template, str):
-                    with contextlib.suppress(AttributeError, TypeError):
-                        ctx_tokenizer.chat_template = chat_template
-                elif callable(chat_template):
-
-                    def ctx_tokenizer_chat_template(messages, tokenizer, **kwargs):
-                        return chat_template(messages, tokenizer, **kwargs)
-
-                    with contextlib.suppress(AttributeError, TypeError):
-                        ctx_tokenizer.chat_template = ctx_tokenizer_chat_template
-
-            # Inject chat_template into vLLM's processor chat template cache
-            # This ensures _try_get_processor_chat_template uses our modified template
-            try:
-                from vllm.entrypoints.chat_utils import _PROCESSOR_CHAT_TEMPLATES
-
-                cache_key = (
-                    opencua_tokenizer.name_or_path,
-                    getattr(self.ctx.model_config, "trust_remote_code", False),
-                )
-                if isinstance(chat_template, str) or callable(chat_template):
-                    _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
-            except ImportError:
-                pass
-
-        # Validate all required special tokens exist and are not UNK
-        im_tokens = ["<|im_user|>", "<|im_assistant|>", "<|im_end|>"]
-        media_tokens = [
-            "<|media_begin|>",
-            "<|media_content|>",
-            "<|media_end|>",
-            "<|media_placeholder|>",
-        ]
-        all_required_tokens = im_tokens + media_tokens
-
-        unk_token_id = (
-            opencua_tokenizer.unk_token_id
-            if hasattr(opencua_tokenizer, "unk_token_id")
-            else None
-        )
-
-        for token_str in all_required_tokens:
-            assert token_str in vocab, (
-                f"Missing required token: {token_str}. "
-                f"This will break text recognition."
-            )
-            token_id = vocab[token_str]
-            if unk_token_id is not None:
-                assert token_id != unk_token_id, (
-                    f"Token {token_str} mapped to UNK (id={token_id}). "
-                    f"This will break text recognition."
-                )
-
-        actual_media_placeholder_id = opencua_tokenizer.convert_tokens_to_ids(
-            "<|media_placeholder|>"
-        )
-        assert actual_media_placeholder_id == media_placeholder_id, (
-            f"processor.image_token_id mismatch: "
-            f"vocab={media_placeholder_id}, "
-            f"convert_tokens_to_ids={actual_media_placeholder_id}"
-        )
-
-        # Cache the processor to avoid reloading
-        self._cached_processor = processor
-        return processor
-
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """
-        Call the HF processor on the prompt text and associated multi-modal data.
-        """
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -1393,82 +870,39 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        # Use Qwen2.5-VL's approach: get token IDs from processor's
-        # image_token/video_token strings
-        # This matches what Qwen2VLDummyInputsBuilder generates
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-
-        if hf_processor.image_token != "<|media_placeholder|>":
-            raise ValueError(
-                f"processor.image_token must be '<|media_placeholder|>', "
-                f"but got '{hf_processor.image_token}'. "
-                f"This will break text recognition. "
-                f"Please ensure OpenCUA processor is correctly configured."
-            )
-
-        if hf_processor.image_token not in vocab:
-            raise ValueError(
-                f"processor.image_token '{hf_processor.image_token}' "
-                f"not found in vocab. "
-                f"This will break text recognition."
-            )
-
-        # Get actual token ID from vocab
         media_placeholder_id = vocab[hf_processor.image_token]
 
-        # Get config for consistency check
         hf_config = self.info.get_hf_config()
-
         if hasattr(hf_config, "image_token_id"):
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
 
-        # Use the actual token ID from vocab (not from config)
+        if image_processor.merge_size != hf_config.vision_config.spatial_merge_size:
+            raise ValueError(
+                f"image_processor.merge_size ({image_processor.merge_size}) != "
+                f"vision_config.spatial_merge_size "
+                f"({hf_config.vision_config.spatial_merge_size})"
+            )
+
+        merge_length = image_processor.merge_size**2
         replacement_token_id = {
             "image": media_placeholder_id,
-            "video": media_placeholder_id,  # OpenCUA may use same token
+            "video": media_placeholder_id,
         }
-
         placeholder = {
             "image": media_placeholder_id,
             "video": media_placeholder_id,
         }
 
-        merge_length = image_processor.merge_size**2
-        hf_config = self.info.get_hf_config()
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        if image_processor.merge_size != spatial_merge_size:
-            raise ValueError(
-                f"CRITICAL: image_processor.merge_size "
-                f"({image_processor.merge_size}) != "
-                f"vision_config.spatial_merge_size ({spatial_merge_size}). "
-                "This mismatch will cause incorrect visual token count "
-                "calculation and break text/vision alignment. "
-                "Please fix your configuration to match."
-            )
-
         def get_replacement_opencua(item_idx: int, modality: str):
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            # grid_thw shape: (t, h, w) - temporal, height, width in patches
-            # num_tokens = (t×h×w) // merge_length
+            grid_thw = out_mm_kwargs[modality][item_idx][f"{modality}_grid_thw"].data
             grid_t, grid_h, grid_w = map(int, grid_thw)
-            total_patches = grid_t * grid_h * grid_w
-            num_tokens = total_patches // merge_length
-
-            assert num_tokens > 0, (
-                f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
-                f"(grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
-                f"total_patches={total_patches}, merge_length={merge_length}). "
-                f"Check image processing configuration."
-            )
-
+            num_tokens = (grid_t * grid_h * grid_w) // merge_length
             return [replacement_token_id[modality]] * num_tokens
 
         return [
@@ -1520,12 +954,8 @@ class OpenCUA_VLForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
-        if modality.startswith("image"):
+        if modality.startswith("image") or modality.startswith("video"):
             return "<|media_placeholder|>"
-        if modality.startswith("video"):
-            return "<|media_placeholder|>"  # OpenCUA uses same token for video
-
         raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1551,7 +981,6 @@ class OpenCUA_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
-            # Store language model hidden_size for debugging
             text_config = getattr(config, "text_config", None)
             if text_config is None:
                 text_config_dict = {
@@ -1576,12 +1005,8 @@ class OpenCUA_VLForConditionalGeneration(
         else:
             self.visual = None
 
-        # Use text_config for language model initialization
-        # (Qwen2ForCausalLM expects Qwen2Config, not OpenCUA_VLConfig)
         text_config = getattr(config, "text_config", None)
         if text_config is None:
-            # If text_config is not set, create one from the main config
-            # Extract text model parameters from the main config
             from transformers.models.qwen2 import Qwen2Config
 
             text_config_dict = {
@@ -1601,29 +1026,18 @@ class OpenCUA_VLForConditionalGeneration(
             }
             text_config = Qwen2Config(**text_config_dict)
 
-        # OpenCUA uses 1D RoPE, but implements SupportsMRoPE interface
-        # Set rope_scaling to enable M-RoPE position calculation
-        # (get_mrope_input_positions will use 1D sequential positions)
-        # Check if rope_scaling needs to be set (even if text_config exists)
         rope_scaling = getattr(text_config, "rope_scaling", None)
         if (
             rope_scaling is None
             or not isinstance(rope_scaling, dict)
             or "mrope_section" not in rope_scaling
         ):
-            # Calculate mrope_section for 1D RoPE
-            # For 1D RoPE, we split rotary_dim equally across T, H, W
-            # This ensures MRotaryEmbedding is created and can handle 3D positions
-            # with all dimensions having the same value (1D sequential positions)
-            head_dim = getattr(text_config, "head_dim", None)
-            if head_dim is None:
-                head_dim = text_config.hidden_size // text_config.num_attention_heads
-            rotary_dim = head_dim
-            # Split rotary_dim // 2 equally across 3 dimensions for 1D RoPE
-            section_size = (rotary_dim // 2) // 3
-            remainder = (rotary_dim // 2) % 3
+            head_dim = getattr(text_config, "head_dim", None) or (
+                text_config.hidden_size // text_config.num_attention_heads
+            )
+            section_size = (head_dim // 2) // 3
+            remainder = (head_dim // 2) % 3
             mrope_section = [section_size] * 3
-            # Distribute remainder to first dimensions
             for i in range(remainder):
                 mrope_section[i] += 1
             text_config.rope_scaling = {
@@ -1865,15 +1279,6 @@ class OpenCUA_VLForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for OpenCUA-VL.
-
-        Args:
-            input_ids: Flattened (concatenated) input_ids corresponding to a
-                batch.
-            positions: Flattened (concatenated) position ids corresponding to a
-                batch. **NOTE**: For OpenCUA-VL, positions are 1D instead of 3D.
-        """
-
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1903,11 +1308,6 @@ class OpenCUA_VLForConditionalGeneration(
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
-        """Get 1D RoPE input positions for OpenCUA-VL model.
-
-        OpenCUA uses 1D RoPE instead of M-RoPE, so all position dimensions
-        (T, H, W) are set to the same 1D sequential position value.
-        """
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
@@ -1967,37 +1367,20 @@ class OpenCUA_VLForConditionalGeneration(
                 remain_videos -= 1
                 ed = ed_video
 
-            llm_grid_t, llm_grid_h, llm_grid_w = (
-                t,
-                h // spatial_merge_size,
-                w // spatial_merge_size,
-            )
+            llm_grid_t = t
+            llm_grid_h = h // spatial_merge_size
+            llm_grid_w = w // spatial_merge_size
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-
-            # Calculate st_idx after text_len (match Qwen2.5-VL order)
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-
-            # Text tokens: 1D sequential positions (all dimensions same)
-            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
             text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             llm_pos_ids_list.append(text_positions)
-
-            # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after text tokens (placeholder replaced by visual)
-            # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
-            # OpenCUA: placeholder is at position st_idx + text_len - 1,
-            # visual starts after it
             visual_start_pos = st_idx + text_len
             visual_positions = (
                 torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
                 + visual_start_pos
             )
             llm_pos_ids_list.append(visual_positions)
-
-            # Skip the placeholder token in input_tokens
-            # (placeholder is replaced by num_visual_tokens visual embeddings
-            # in actual sequence)
             st = ed + 1
 
         if st < len(input_tokens):
@@ -2017,33 +1400,9 @@ class OpenCUA_VLForConditionalGeneration(
         if self.visual is None:
             skip_prefixes.extend(["visual."])
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-        # Check critical vision components
-        # Note: rotary_pos_emb is not a weight parameter (it's computed at runtime)
-        critical_components = [
-            "visual.patch_embed",
-            "visual.blocks.0",
-            "visual.merger",
-        ]
-        missing_components = []
-        for component in critical_components:
-            if not any(p.startswith(component) for p in loaded_params):
-                missing_components.append(component)
-
-        if missing_components:
-            logger.warning(
-                "OpenCUA missing critical vision components: %s. "
-                "This may cause vision processing issues.",
-                missing_components,
-            )
-
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger.",
