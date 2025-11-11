@@ -1471,9 +1471,9 @@ class OpenCUA_VLForConditionalGeneration(
 
         # OpenCUA uses Kimi-VL style: only <|media_placeholder|> token,
         # no vision_start/end tokens
-        input_tokens_tensor = torch.tensor(input_tokens)
-        image_nums = (input_tokens_tensor == image_token_id).sum().item()
-        video_nums = (input_tokens_tensor == video_token_id).sum().item()
+        # Use image_grid_thw and video_grid_thw lengths to get actual counts
+        image_nums = len(image_grid_thw) if image_grid_thw else 0
+        video_nums = len(video_grid_thw) if video_grid_thw else 0
         llm_pos_ids_list: list = []
 
         st = 0
@@ -1496,6 +1496,11 @@ class OpenCUA_VLForConditionalGeneration(
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
+                if image_index >= len(image_grid_thw):
+                    raise IndexError(
+                        f"image_index {image_index} >= len(image_grid_thw) "
+                        f"{len(image_grid_thw)}"
+                    )
                 t, h, w = (
                     image_grid_thw[image_index][0],
                     image_grid_thw[image_index][1],
@@ -1505,6 +1510,11 @@ class OpenCUA_VLForConditionalGeneration(
                 remain_images -= 1
                 ed = ed_image
             else:
+                if video_index >= len(video_grid_thw):
+                    raise IndexError(
+                        f"video_index {video_index} >= len(video_grid_thw) "
+                        f"{len(video_grid_thw)}"
+                    )
                 t, h, w = (
                     video_grid_thw[video_index][0],
                     video_grid_thw[video_index][1],
