@@ -885,6 +885,16 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     "rope_type": "default",
                     "mrope_section": mrope_section,
                 }
+        # Sync token IDs with tokenizer to ensure consistency
+        # This is critical for correct tokenization and model behavior
+        try:
+            tokenizer = self.get_tokenizer()
+            if hasattr(config, "sync_special_token_ids"):
+                config.sync_special_token_ids(tokenizer)
+        except Exception:
+            # If tokenizer is not available yet, skip synchronization
+            # It will be synced later when tokenizer is available
+            pass
         return config
 
     def get_hf_processor(self, **kwargs: object) -> OpenCUA_VLProcessor:
@@ -1165,46 +1175,35 @@ class OpenCUA_VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-        # Log token IDs for verification
+        # Sync token IDs with tokenizer and log for verification
         logger = init_logger(__name__)
-        if hasattr(config, "media_placeholder_token_id"):
-            media_placeholder_id = config.media_placeholder_token_id
-            pad_token_id = getattr(config, "pad_token_id", 0)
-            logger.info(
-                "OpenCUA token IDs - media_placeholder_token_id: %d, pad_token_id: %d",
-                media_placeholder_id,
-                pad_token_id,
-            )
-            # Verify with tokenizer if available
+        if hasattr(config, "sync_special_token_ids"):
             try:
-                from vllm.multimodal.registry import MULTIMODAL_REGISTRY
-
                 processor = MULTIMODAL_REGISTRY.create_processor(
                     vllm_config.model_config
                 )
                 tokenizer = processor.info.get_tokenizer()
-                vocab = tokenizer.get_vocab()
-                actual_media_id = vocab.get("<|media_placeholder|>")
-                actual_pad_id = getattr(tokenizer, "pad_token_id", None)
-                if actual_media_id is not None:
-                    match = actual_media_id == media_placeholder_id
-                    logger.info(
-                        "Tokenizer <|media_placeholder|> ID: %d "
-                        "(config: %d, match: %s)",
-                        actual_media_id,
-                        media_placeholder_id,
-                        match,
-                    )
-                if actual_pad_id is not None:
-                    match = actual_pad_id == pad_token_id
-                    logger.info(
-                        "Tokenizer pad_token_id: %d (config: %d, match: %s)",
-                        actual_pad_id,
-                        pad_token_id,
-                        match,
-                    )
+                # Sync token IDs from tokenizer to config
+                config.sync_special_token_ids(tokenizer)
+                logger.info(
+                    "OpenCUA token IDs synced with tokenizer - "
+                    "media_placeholder_token_id: %d, pad_token_id: %d",
+                    config.media_placeholder_token_id,
+                    getattr(config, "pad_token_id", 0),
+                )
             except Exception as e:
-                logger.warning("Could not verify token IDs with tokenizer: %s", e)
+                logger.warning(
+                    "Could not sync token IDs with tokenizer: %s. "
+                    "Using default config values.",
+                    e,
+                )
+                if hasattr(config, "media_placeholder_token_id"):
+                    logger.info(
+                        "OpenCUA token IDs (default) - "
+                        "media_placeholder_token_id: %d, pad_token_id: %d",
+                        config.media_placeholder_token_id,
+                        getattr(config, "pad_token_id", 0),
+                    )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
