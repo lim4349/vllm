@@ -846,11 +846,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         """Get processor from OpenCUA config."""
-        model_path = self.ctx.model_config.model
-        return Qwen2_5_VLProcessor.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            use_fast=kwargs.pop("use_fast", True),
+        from vllm.transformers_utils.processor import cached_image_processor_from_config
+
+        tokenizer = self.get_tokenizer()
+        image_processor = cached_image_processor_from_config(
+            self.ctx.model_config, **kwargs
+        )
+        return Qwen2_5_VLProcessor(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
             **kwargs,
         )
 
