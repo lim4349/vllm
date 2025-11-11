@@ -798,7 +798,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             total_tokens, self.spatial_merge_unit, -1
         )
 
-        rotary_pos_emb_1d = rotary_pos_emb_1d[window_index_1d, :, :]
+        # Sequential indexing: no reordering needed
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_1d must match Qwen2.5-VL's cu_seqlens_thw format:
@@ -845,15 +845,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         # patchify
         seq_len, _ = x.size()
         rotary_pos_emb = []
-        window_index: list = []
-        cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)  # [seq, dim]
 
-        window_index_id = 0
-        cu_window_seqlens_last = 0
         for idx, (t, h, w) in enumerate(grid_thw):
             t, h, w = int(t), int(h), int(w)
             # Verify grid_thw is in patch units
@@ -866,36 +862,18 @@ class OpenCUA_VisionTransformer(nn.Module):
                     f"This suggests grid_thw is in pixels instead of patches, "
                     f"which will break token alignment and spatial structure."
                 )
-            llm_h = h // self.spatial_merge_size
-            llm_w = w // self.spatial_merge_size
 
             (
                 rotary_pos_emb_1d,
-                window_index_1d,
-                cu_seqlens_window_1d,
+                _,
+                _,
                 cu_seqlens_1d,
             ) = self.get_rope_by_1d(t, h, w)
 
-            window_index.append(window_index_1d + window_index_id)
-            window_index_id += t * llm_h * llm_w
-
-            # 윈도우 cu (이미 0 시작이면 pad 불필요)
-            cu_seqlens_window_1d = cu_seqlens_window_1d + cu_window_seqlens_last
-            cu_window_seqlens_last = cu_seqlens_window_1d[-1]
-            cu_window_seqlens.append(cu_seqlens_window_1d)
-
             rotary_pos_emb.append(rotary_pos_emb_1d)
-
             cu_seqlens.append(cu_seqlens_1d)
 
         rotary_pos_emb = torch.cat(rotary_pos_emb)  # [seq, ...]
-        window_index = torch.cat(window_index).to(torch.long)  # [num_windows * win_len]
-        reverse_indices = self.invert_permutation(window_index)  # [seq]
-        cu_window_seqlens = torch.cat(cu_window_seqlens)
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
-        # 선행 0이 없다면 pad 필수
-        if cu_window_seqlens[0].item() != 0:
-            cu_window_seqlens = F.pad(cu_window_seqlens, (1, 0), "constant", 0)
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         # (안전) 머지 후 토큰 단위 보장.
@@ -904,10 +882,6 @@ class OpenCUA_VisionTransformer(nn.Module):
             cu_seqlens = cu_seqlens * self.spatial_merge_unit
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
-        # 시퀀셜 인덱싱 사용 시 cu_window_seqlens는 이미 merge 단위로 계산됨
-        # get_window_index_1d에서 spatial_merge_unit로 스케일링된 값을 반환
-        # 따라서 추가 스케일링 불필요
-
         # 배치 차원 추가
         hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
 
@@ -915,35 +889,18 @@ class OpenCUA_VisionTransformer(nn.Module):
 
         # 사전 계산 (보통 CPU int32 기대)
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens
-        )
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
-        window_index = window_index.to(device=hidden_states.device, non_blocking=True)
-        reverse_indices = reverse_indices.to(
-            device=hidden_states.device, non_blocking=True
-        )
 
+        # OpenCUA uses only full attention (sequential), no window attention
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                # -------- Full Attention: 시퀀셜 순서 유지 --------
-                hidden_states = blk(
-                    hidden_states,
-                    cu_seqlens=cu_seqlens,
-                    rotary_pos_emb=rotary_pos_emb,
-                    max_seqlen=max_seqlen_full,
-                    seqlens=seqlens_full,
-                )
-            else:
-                hidden_states = blk(
-                    hidden_states,
-                    cu_seqlens=cu_window_seqlens,
-                    rotary_pos_emb=rotary_pos_emb,
-                    max_seqlen=max_seqlen_window,
-                    seqlens=seqlens_window,
-                )
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb=rotary_pos_emb,
+                max_seqlen=max_seqlen_full,
+                seqlens=seqlens_full,
+            )
 
         # For OpenCUA-VL, float16 will overflow at last block
         # for long visual tokens sequences.
