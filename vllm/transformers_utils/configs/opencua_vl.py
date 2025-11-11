@@ -75,6 +75,11 @@ class OpenCUA_VLConfig(PretrainedConfig):
         self.max_pixels = (
             max_pixels if max_pixels is not None else getattr(vc, "max_pixels", None)
         )
+        
+        # Set rope_theta in vision_config if not already set
+        # This ensures 1D RoPE uses the correct base frequency
+        if not hasattr(vc, "rope_theta") or vc.rope_theta is None:
+            vc.rope_theta = float(rope_base)
 
         # 간단 validation
         for k in [
