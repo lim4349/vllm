@@ -1011,10 +1011,9 @@ class OpenCUA_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         num_videos = mm_counts.get("video", 0)
 
         # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
-        image_token = "<|media_placeholder|>"
-        video_token = "<|media_placeholder|>"
+        media_token = "<|media_placeholder|>"
 
-        return image_token * num_images + video_token * num_videos
+        return media_token * num_images + media_token * num_videos
 
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
@@ -1587,8 +1586,6 @@ class OpenCUA_VLForConditionalGeneration(
                     torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
                 )
                 llm_pos_ids_list.append(text_positions)
-                # Update st_idx after adding text positions
-                st_idx = llm_pos_ids_list[-1].max() + 1
 
             # OpenCUA uses 1D RoPE for vision transformer, but language model
             # MRoPE still expects 3D positions. Generate proper 3D positions
@@ -1611,11 +1608,10 @@ class OpenCUA_VLForConditionalGeneration(
                 .expand(llm_grid_t, llm_grid_h, -1)
                 .flatten()
             )
-            # visual_positions start after text_len tokens (placeholder token is at ed)
-            # After replacement, placeholder at ed is replaced with visual tokens
-            # So visual positions start at st_idx (which is after text positions)
+            # visual_positions start after text_len tokens
+            # This matches Qwen2.5-VL logic: visual_positions = positions + text_len + st_idx
             visual_positions = (
-                torch.stack([t_index, h_index, w_index]) + st_idx
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
