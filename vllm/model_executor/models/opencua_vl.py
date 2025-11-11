@@ -813,8 +813,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_1d must match Qwen2.5-VL's cu_seqlens_thw format:
-        # repeat h*w for each image/frame (number of tokens before merge)
-        # This is the number of patches before merge, which is h * w
+        # This represents the number of patches before merge (h * w)
+        # Note: h and w are already in patch units from grid_thw
+        # This is used for full attention blocks and must be in patch units
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -1496,16 +1497,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_config = self.info.get_hf_config()
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         if image_processor.merge_size != spatial_merge_size:
-            logger.error(
-                "CRITICAL: image_processor.merge_size (%s) != "
-                "vision_config.spatial_merge_size (%s). "
-                "This mismatch will cause incorrect visual token count calculation. "
-                "Using image_processor.merge_size (%s) for compatibility, "
-                "but this may break text recognition. "
-                "Please ensure both values match in your configuration.",
-                image_processor.merge_size,
-                spatial_merge_size,
-                image_processor.merge_size,
+            raise ValueError(
+                f"CRITICAL: image_processor.merge_size "
+                f"({image_processor.merge_size}) != "
+                f"vision_config.spatial_merge_size ({spatial_merge_size}). "
+                "This mismatch will cause incorrect visual token count "
+                "calculation and break text/vision alignment. "
+                "Please fix your configuration to match."
             )
 
         def get_replacement_opencua(item_idx: int, modality: str):
