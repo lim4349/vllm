@@ -821,29 +821,28 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
     """Custom processor for OpenCUA that accepts TikTokenV3 tokenizer.
 
     OpenCUA uses TikTokenV3 tokenizer instead of Qwen2Tokenizer,
-    so we need to bypass the type checking in the parent class.
+    so we override tokenizer_class to allow TikTokenV3.
     """
 
-    def __init__(
-        self,
-        image_processor=None,
-        tokenizer=None,
-        video_processor=None,
-        chat_template=None,
-        **kwargs,
-    ):
-        # Bypass type checking by calling the parent's parent __init__
-        # directly, which skips the tokenizer type validation
-        from transformers.processing_utils import ProcessorMixin
+    # Override tokenizer_class to include TikTokenV3
+    # This allows the processor to accept TikTokenV3 tokenizer
+    tokenizer_class = (
+        "Qwen2Tokenizer",
+        "Qwen2TokenizerFast",
+        "TikTokenV3",
+        "CachedTikTokenV3",
+    )
 
-        ProcessorMixin.__init__(
-            self,
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            video_processor=video_processor,
-            chat_template=chat_template,
-            **kwargs,
-        )
+    def check_argument_for_proper_class(self, attribute_name, arg):
+        """Override to skip type checking for tokenizer.
+
+        This allows TikTokenV3 tokenizer to be used without type errors.
+        """
+        # Skip type checking for tokenizer to allow TikTokenV3
+        if attribute_name == "tokenizer":
+            return
+        # Use parent's type checking for other attributes
+        return super().check_argument_for_proper_class(attribute_name, arg)
 
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
