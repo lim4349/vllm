@@ -782,8 +782,10 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
-        """Get 1D RoPE embeddings instead of 3D M-RoPE"""
-        window_index_1d, cu_seqlens_window_1d = self.get_window_index_1d(t, h, w)
+        """Get 1D RoPE embeddings for sequential indexing.
+
+        OpenCUA uses only sequential indexing, no window attention.
+        """
         llm_grid_h = h // self.spatial_merge_size
         llm_grid_w = w // self.spatial_merge_size
         total_tokens = t * llm_grid_h * llm_grid_w
@@ -798,7 +800,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             total_tokens, self.spatial_merge_unit, -1
         )
 
-        # Sequential indexing: no reordering needed
+        # Sequential indexing: no reordering needed, just flatten
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_1d must match Qwen2.5-VL's cu_seqlens_thw format:
@@ -809,12 +811,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             torch.tensor([h * w], dtype=torch.int32), t
         )
 
-        return (
-            rotary_pos_emb_1d,
-            window_index_1d,
-            cu_seqlens_window_1d,
-            cu_seqlens_1d,
-        )
+        return rotary_pos_emb_1d, cu_seqlens_1d
 
     def compute_attn_mask_seqlen(
         self,
@@ -863,12 +860,7 @@ class OpenCUA_VisionTransformer(nn.Module):
                     f"which will break token alignment and spatial structure."
                 )
 
-            (
-                rotary_pos_emb_1d,
-                _,
-                _,
-                cu_seqlens_1d,
-            ) = self.get_rope_by_1d(t, h, w)
+            rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
 
             rotary_pos_emb.append(rotary_pos_emb_1d)
             cu_seqlens.append(cu_seqlens_1d)
@@ -876,11 +868,25 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb = torch.cat(rotary_pos_emb)  # [seq, ...]
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
-        # (안전) 머지 후 토큰 단위 보장.
-        # get_rope_by_1d가 이미 머지 단위라면 중복 곱하지 말 것.
-        if getattr(self, "full_cu_is_unmerged", True):
-            cu_seqlens = cu_seqlens * self.spatial_merge_unit
+        # cu_seqlens_1d is in patch units (h * w), but seq_len is in merge units
+        # Scale by spatial_merge_unit to match actual sequence length
+        cu_seqlens = cu_seqlens * self.spatial_merge_unit
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+
+        # Validation: cu_seqlens[-1] must match seq_len
+        if cu_seqlens[-1].item() != seq_len:
+            raise ValueError(
+                f"Sequence length mismatch: cu_seqlens[-1]={cu_seqlens[-1].item()} "
+                f"!= seq_len={seq_len}. Check cu_seqlens scaling."
+            )
+
+        # Validation: rotary_pos_emb shape must match seq_len
+        if rotary_pos_emb.shape[0] != seq_len:
+            raise ValueError(
+                f"RoPE shape mismatch: "
+                f"rotary_pos_emb.shape[0]={rotary_pos_emb.shape[0]} "
+                f"!= seq_len={seq_len}"
+            )
 
         # 배치 차원 추가
         hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
@@ -908,7 +914,6 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # merger & 출력
-        # (전역 재정렬을 안 했으니 여기서 reverse_indices는 쓰지 않음)
         # [seq, 1, ctx_dim] -> [seq, ctx_dim]
         hidden_states = self.merger(hidden_states)
         return hidden_states
