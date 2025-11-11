@@ -822,6 +822,7 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
 
     OpenCUA uses TikTokenV3 tokenizer instead of Qwen2Tokenizer,
     so we override tokenizer_class to allow TikTokenV3.
+    OpenCUA also uses <|media_placeholder|> instead of <|image_pad|>.
     """
 
     # Override tokenizer_class to include TikTokenV3
@@ -832,6 +833,10 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
         "TikTokenV3",
         "CachedTikTokenV3",
     )
+
+    # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
+    image_token = "<|media_placeholder|>"
+    video_token = "<|media_placeholder|>"
 
     def check_argument_for_proper_class(self, attribute_name, arg):
         """Override to skip type checking for tokenizer.
