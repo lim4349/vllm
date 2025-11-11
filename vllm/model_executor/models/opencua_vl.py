@@ -571,21 +571,58 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
-        # OpenCUA uses 1D RoPE, so vision transformer output is
-        # already in 1D order. Use simple reshape like Qwen2.5-VL.
+        # Normalize first
         x = self.ln_q(x)
-        
-        # Qwen2.5-VL style: simple view reshape
-        # The vision transformer with 1D RoPE outputs patches in
-        # sequential order. We need to reshape to
-        # [num_merged_tokens, hidden_size] where
-        # hidden_size = context_dim * spatial_merge_size^2
-        # This groups spatial_merge_size^2 patches together
-        # Ensure contiguous memory layout for better performance
-        x = x.contiguous().view(-1, self.hidden_size)
-        
-        out = self.mlp(x)
-        return out
+
+        # Check if input is already merged or unmerged
+        # merged_dim = context_dim * spatial_merge_size^2
+        C = self.context_dim
+        m = self.spatial_merge_size
+        merged_dim = C * (m**2)
+
+        # Ensure x is 2D
+        if x.ndim != 2:
+            x = x.reshape(-1, x.shape[-1])
+
+        # If already merged [num_tokens, context_dim*m*m], pass through
+        if x.shape[-1] == merged_dim:
+            # Already merged: no additional rearrangement needed
+            return self.mlp(x)
+
+        # Still unmerged [t*h*w, C]: perform block merge with spatial order
+        assert x.shape[-1] == C, (
+            f"Unexpected hidden size: {x.shape[-1]} != {C}. "
+            f"Expected either {C} (unmerged) or {merged_dim} (merged)"
+        )
+        assert (
+            grid_thw is not None and len(grid_thw) > 0
+        ), "grid_thw is required for merging unmerged patches"
+
+        out_chunks = []
+        start = 0
+        for t, h, w in grid_thw:
+            t, h, w = int(t), int(h), int(w)
+            n = t * h * w
+            xi = x[start : start + n]  # [t*h*w, C]
+            start += n
+
+            # Reshape to [t, h, w, C] then merge m×m blocks
+            assert (
+                h % m == 0 and w % m == 0
+            ), f"h={h}, w={w} must be divisible by merge_size={m}"
+            # [t, h, w, C] -> [t, h//m, m, w//m, m, C]
+            xi = xi.reshape(t, h, w, C)
+            xi = xi.reshape(t, h // m, m, w // m, m, C)
+            # Permute to group m×m blocks: [t, h//m, w//m, m, m, C]
+            xi = xi.permute(0, 1, 3, 2, 4, 5).contiguous()
+            # Flatten to [t*(h//m)*(w//m), C*m*m]
+            xi = xi.reshape(-1, merged_dim)
+            out_chunks.append(xi)
+
+        x = torch.cat(out_chunks, dim=0)  # [num_merged_tokens, C*m*m]
+
+        # MLP projection
+        return self.mlp(x)
 
 
 class OpenCUA_VisionRotaryEmbedding(nn.Module):
