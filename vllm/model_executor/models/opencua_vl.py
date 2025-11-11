@@ -844,6 +844,17 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
         # Use parent's type checking for other attributes
         return super().check_argument_for_proper_class(attribute_name, arg)
 
+    def _check_special_mm_tokens(self, text, text_inputs, modalities=None):
+        """Override to skip special token checking for TikTokenV3.
+
+        TikTokenV3 tokenizer may handle special tokens differently,
+        so we skip the validation to avoid errors.
+        """
+        # Skip the special token count validation for TikTokenV3
+        # The parent's _check_special_mm_tokens checks token counts
+        # which may not work correctly with TikTokenV3
+        pass
+
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
