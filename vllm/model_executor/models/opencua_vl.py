@@ -853,17 +853,18 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         tokenizer = self.get_tokenizer()
         image_processor_config = self.ctx.get_hf_image_processor_config()
 
-        # Try to get processor using init_processor with explicit tokenizer
-        # This avoids the issue where Qwen2_5_VLProcessor.from_pretrained
-        # tries to load Qwen2Tokenizer instead of TikTokenV3
+        # Use AutoImageProcessor and AutoVideoProcessor to avoid import issues
+        # across different transformers versions
         try:
-            from transformers.models.qwen2_5_vl import (
-                Qwen2_5_VLImageProcessor,
-                Qwen2_5_VLVideoProcessor,
-            )
+            from transformers import AutoImageProcessor, AutoVideoProcessor
 
-            image_processor = Qwen2_5_VLImageProcessor(**image_processor_config)
-            video_processor = Qwen2_5_VLVideoProcessor(**image_processor_config)
+            model_path = self.ctx.model_config.model
+            image_processor = AutoImageProcessor.from_pretrained(
+                model_path, **image_processor_config
+            )
+            video_processor = AutoVideoProcessor.from_pretrained(
+                model_path, **image_processor_config
+            )
 
             return self.ctx.init_processor(
                 Qwen2_5_VLProcessor,
@@ -874,9 +875,12 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 **kwargs,
             )
         except Exception:
-            # Fallback to default method if init_processor fails
+            # Fallback: try to pass tokenizer explicitly to get_hf_processor
+            # This should work if cached_processor_from_config properly
+            # handles tokenizer
             return self.ctx.get_hf_processor(
                 Qwen2_5_VLProcessor,
+                tokenizer=tokenizer,
                 use_fast=kwargs.pop("use_fast", True),
                 **kwargs,
             )
