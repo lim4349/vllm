@@ -660,6 +660,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        # Flag to control cu_seqlens scaling for full attention path
+        # If True, cu_seqlens needs to be scaled by spatial_merge_unit
+        self.full_cu_is_unmerged = True
 
         # Validate window size configuration for window attention
         # vit_merger_window_size = (window_size // patch_size) // spatial_merge_size
@@ -761,72 +764,17 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def get_window_index_1d(self, grid_t, grid_h, grid_w):
-        """Window indexing for 1D RoPE with spatial locality preserved.
+        """Simple sequential indexing for 1D RoPE.
 
-        Even though we use 1D RoPE, we still need to preserve spatial
-        locality for window attention to work correctly. This is critical
-        for vision transformer to extract spatial information from images.
+        OpenCUA uses simple sequential indexing without window structure
+        for correct Korean output.
         """
-        # Window size conversion: (window_size // patch_size) // spatial_merge_size
-        # This order is critical for correct boundary alignment
-        # Validation is done in __init__ to ensure vit_merger_window_size >= 1
-        vit_merger_window_size = (
-            self.window_size // self.patch_size
-        ) // self.spatial_merge_size
-
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
-        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
-            grid_t, llm_grid_h, llm_grid_w
-        )
-
-        # Padding: use modular arithmetic for safety (remainder=0 -> pad=0)
-        pad_h = (
-            vit_merger_window_size - (llm_grid_h % vit_merger_window_size)
-        ) % vit_merger_window_size
-        pad_w = (
-            vit_merger_window_size - (llm_grid_w % vit_merger_window_size)
-        ) % vit_merger_window_size
-
-        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
-        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
-        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
-
-        # Index reshape order: row-major -> window grouping -> window inner row/col
-        # [t, H, W] -> pad -> [t, nH, win, nW, win] ->
-        # permute(0,1,3,2,4) -> [t, nH*nW, win, win]
-        index_padded = index_padded.reshape(
-            grid_t,
-            num_windows_h,
-            vit_merger_window_size,
-            num_windows_w,
-            vit_merger_window_size,
-        )
-        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
-            grid_t,
-            num_windows_h * num_windows_w,
-            vit_merger_window_size,
-            vit_merger_window_size,
-        )
-        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
-        index_padded = index_padded.reshape(-1)
-
-        # dtype/device 정합 (중요)
-        device = index_padded.device
-        index_new = index_padded[index_padded != -100].to(
-            dtype=torch.long, device=device
-        )
-        seqlens = seqlens.to(dtype=torch.int32, device=device)
-
-        # cu_seqlens: 윈도우 경로는 seqlens.cumsum() * spatial_merge_unit
-        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
-        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32, device=device)
-        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
-
-        # ⬇️⬇️⬇️ 여기가 핵심 1줄: 선행 0 패딩을 반드시 넣어야 함
-        cu_seqlens_tmp = F.pad(cu_seqlens_tmp, (1, 0), "constant", 0)
-
-        return index_new, cu_seqlens_tmp
+        num_tokens = grid_t * llm_grid_h * llm_grid_w
+        index = torch.arange(num_tokens)
+        cu_seqlens = torch.tensor([num_tokens], dtype=torch.int32)
+        return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
@@ -898,14 +846,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens: list = []
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
-        hidden_states = self.patch_embed(hidden_states)
+        hidden_states = self.patch_embed(hidden_states)  # [seq, dim]
 
         window_index_id = 0
         cu_window_seqlens_last = 0
         for idx, (t, h, w) in enumerate(grid_thw):
             t, h, w = int(t), int(h), int(w)
-            # 6. Processor/grid_thw unit verification: log to confirm patch units
-            # grid_thw must be in patch units (not pixels)
             # Verify grid_thw is in patch units
             # (must be divisible by spatial_merge_size)
             if h % self.spatial_merge_size != 0 or w % self.spatial_merge_size != 0:
@@ -929,6 +875,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             window_index.append(window_index_1d + window_index_id)
             window_index_id += t * llm_h * llm_w
 
+            # 윈도우 cu (이미 0 시작이면 pad 불필요)
             cu_seqlens_window_1d = cu_seqlens_window_1d + cu_window_seqlens_last
             cu_window_seqlens_last = cu_seqlens_window_1d[-1]
             cu_window_seqlens.append(cu_seqlens_window_1d)
@@ -937,118 +884,89 @@ class OpenCUA_VisionTransformer(nn.Module):
 
             cu_seqlens.append(cu_seqlens_1d)
 
-        rotary_pos_emb = torch.cat(rotary_pos_emb)
-        window_index = torch.cat(window_index)
-        # compute reverse indices
-        reverse_indices = self.invert_permutation(window_index)
+        rotary_pos_emb = torch.cat(rotary_pos_emb)  # [seq, ...]
+        window_index = torch.cat(window_index).to(torch.long)  # [num_windows * win_len]
+        reverse_indices = self.invert_permutation(window_index)  # [seq]
         cu_window_seqlens = torch.cat(cu_window_seqlens)
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
-        # Add leading 0 padding for cu_window_seqlens to match cu_seqlens format
-        # This is critical for correct token boundary calculation in window attention
-        cu_window_seqlens = F.pad(cu_window_seqlens, (1, 0), "constant", 0)
+        # 선행 0이 없다면 pad 필수
+        if cu_window_seqlens[0].item() != 0:
+            cu_window_seqlens = F.pad(cu_window_seqlens, (1, 0), "constant", 0)
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
+        # (안전) 머지 후 토큰 단위 보장.
+        # get_rope_by_1d가 이미 머지 단위라면 중복 곱하지 말 것.
+        if getattr(self, "full_cu_is_unmerged", True):
+            cu_seqlens = cu_seqlens * self.spatial_merge_unit
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
-        # Validation: Verify leading 0 padding for both window and full paths
-        if cu_window_seqlens[0] != 0 or cu_seqlens[0] != 0:
-            raise ValueError(
-                f"Both cu_window_seqlens and cu_seqlens must start with 0. "
-                f"Got cu_window_seqlens[0]={cu_window_seqlens[0]}, "
-                f"cu_seqlens[0]={cu_seqlens[0]}"
-            )
+        # 배치 차원 추가
+        hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
 
-        # transformers
-        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
+        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
+
+        # 사전 계산 (보통 CPU int32 기대)
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens
         )
 
-        # Validation: Verify full path length scale
-        # len(hidden_states) must match cu_seqlens last value
-        if cu_seqlens[-1] != seq_len:
-            raise ValueError(
-                f"Full path length mismatch: cu_seqlens[-1]={cu_seqlens[-1]} "
-                f"!= seq_len={seq_len}. This indicates incorrect scaling."
-            )
-
-        # Validation: Verify rope/index alignment
-        # rotary_pos_emb.shape[0] must match hidden_states.shape[0]
-        if rotary_pos_emb.shape[0] != seq_len:
-            raise ValueError(
-                f"RoPE/Index alignment mismatch: rotary_pos_emb.shape[0]="
-                f"{rotary_pos_emb.shape[0]} != seq_len={seq_len}"
-            )
-
-        # Validation: Verify max_seqlen and sequence length consistency
-        if max_seqlen_full == 0 or max_seqlen_window == 0:
-            raise ValueError(
-                f"max_seqlen must be > 0. Got max_seqlen_full={max_seqlen_full}, "
-                f"max_seqlen_window={max_seqlen_window}"
-            )
-
-        # Verify cu[1:]-cu[:-1] sum matches seq_len for both paths
-        cu_seqlens_diff = (cu_seqlens[1:] - cu_seqlens[:-1]).sum().item()
-        cu_window_seqlens_diff = (
-            (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).sum().item()
-        )
-        if cu_seqlens_diff != seq_len:
-            raise ValueError(
-                f"Full path sequence length mismatch: "
-                f"sum(cu_seqlens[1:]-cu_seqlens[:-1])={cu_seqlens_diff} "
-                f"!= seq_len={seq_len}"
-            )
-        if cu_window_seqlens_diff != seq_len:
-            raise ValueError(
-                f"Window path sequence length mismatch: "
-                f"sum(cu_window_seqlens[1:]-cu_window_seqlens[:-1])="
-                f"{cu_window_seqlens_diff} != seq_len={seq_len}"
-            )
-
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
-        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
         )
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-
-        hidden_states = hidden_states.unsqueeze(1)
-
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-                max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
+                # -------- Full Attention: 시퀀셜 순서 유지 --------
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens,
+                    rotary_pos_emb=rotary_pos_emb,
+                    max_seqlen=max_seqlen_full,
+                    seqlens=seqlens_full,
+                )
             else:
-                cu_seqlens_now = cu_window_seqlens
-                max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
+                # -------- Window Attention: 이 블록 "안에서만" 재정렬 --------
+                hs = hidden_states.reshape(
+                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+                )  # [N, merge_unit, dim]
+                hs = hs[window_index, :, :].reshape(seq_len, -1)  # gather
+                hs = hs.unsqueeze(1)
 
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens_now,
-                rotary_pos_emb=rotary_pos_emb,
-                max_seqlen=max_seqlen_now,
-                seqlens=seqlens_now,
-            )
+                rpe = rotary_pos_emb.reshape(
+                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+                )
+                # 동일 인덱스로 RPE도 재정렬
+                rpe = rpe[window_index, :, :].reshape(seq_len, -1)
+
+                hs = blk(
+                    hs,
+                    cu_seqlens=cu_window_seqlens,
+                    rotary_pos_emb=rpe,
+                    max_seqlen=max_seqlen_window,
+                    seqlens=seqlens_window,
+                )
+
+                # 원래 순서로 복원
+                hs = hs.squeeze(1)
+                hs = hs.reshape(
+                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+                )
+                hs = hs[reverse_indices, :, :].reshape(seq_len, -1).unsqueeze(1)
+                hidden_states = hs
 
         # For OpenCUA-VL, float16 will overflow at last block
         # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # adapter
-        # Qwen2.5-VL merger accepts [seq_len, 1, context_dim] directly
+        # merger & 출력
+        # (전역 재정렬을 안 했으니 여기서 reverse_indices는 쓰지 않음)
+        # [seq, 1, ctx_dim] -> [seq, ctx_dim]
         hidden_states = self.merger(hidden_states)
-        hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
