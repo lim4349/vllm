@@ -19,7 +19,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
-from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
@@ -846,17 +845,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         """Get processor from OpenCUA config."""
-        from vllm.transformers_utils.processor import cached_image_processor_from_config
+        from transformers import AutoProcessor
 
-        tokenizer = self.get_tokenizer()
-        image_processor = cached_image_processor_from_config(
-            self.ctx.model_config, **kwargs
-        )
-        return Qwen2_5_VLProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
+        model_path = self.ctx.model_config.model
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
             **kwargs,
         )
+        return processor
 
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
