@@ -940,6 +940,20 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             )
 
 
+class OpenCUA_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    """Dummy inputs builder for OpenCUA that uses <|media_placeholder|> token."""
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
+        image_token = "<|media_placeholder|>"
+        video_token = "<|media_placeholder|>"
+
+        return image_token * num_images + video_token * num_videos
+
+
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     def _get_mm_fields_config(
         self,
@@ -961,7 +975,14 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-        media_placeholder_id = vocab[hf_processor.image_token]
+        # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
+        # Use the processor's image_token if available,
+        # otherwise use <|media_placeholder|>
+        image_token = getattr(hf_processor, "image_token", "<|media_placeholder|>")
+        if image_token not in vocab:
+            # Fallback to <|media_placeholder|> if processor token not found
+            image_token = "<|media_placeholder|>"
+        media_placeholder_id = vocab[image_token]
 
         hf_config = self.info.get_hf_config()
         if hasattr(hf_config, "image_token_id"):
@@ -1005,7 +1026,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 @MULTIMODAL_REGISTRY.register_processor(
     OpenCUA_VLMultiModalProcessor,
     info=OpenCUA_VLProcessingInfo,
-    dummy_inputs=Qwen2VLDummyInputsBuilder,
+    dummy_inputs=OpenCUA_VLDummyInputsBuilder,
 )
 class OpenCUA_VLForConditionalGeneration(
     nn.Module,
