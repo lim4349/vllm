@@ -785,13 +785,27 @@ class OpenCUA_VisionTransformer(nn.Module):
         """Get 1D RoPE embeddings for sequential indexing.
 
         OpenCUA uses only sequential indexing, no window attention.
-        RoPE is applied to patch_embed output, so length is t * h * w (patch units).
+        RoPE shape must match Qwen2.5-VL:
+        [t * llm_h * llm_w, spatial_merge_unit, head_dim // 2]
+        then flattened to [t * h * w, head_dim // 2] for sequential processing.
         """
-        # seq_len after patch_embed is t * h * w (patch units)
-        seq_len_patch = t * h * w
+        llm_grid_h = h // self.spatial_merge_size
+        llm_grid_w = w // self.spatial_merge_size
+        total_tokens = t * llm_grid_h * llm_grid_w
 
-        # Generate 1D RoPE for sequential positions
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(seq_len_patch)
+        # Generate 1D RoPE for sequential positions (merge token level)
+        # Each merge token contains spatial_merge_unit patches
+        rotary_pos_emb_1d_full = self.rotary_pos_emb_1d(total_tokens)
+
+        # Reshape to match Qwen2.5-VL format:
+        # [total_tokens, spatial_merge_unit, head_dim // 2]
+        # For 1D RoPE, all patches in a merge token get the same position
+        rotary_pos_emb_1d = rotary_pos_emb_1d_full.unsqueeze(1).expand(
+            -1, self.spatial_merge_unit, -1
+        )
+
+        # Flatten to [t * h * w, head_dim // 2] for sequential processing
+        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_1d: number of patches per frame (h * w) in patch units
         cu_seqlens_1d = torch.repeat_interleave(
