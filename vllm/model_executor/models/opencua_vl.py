@@ -846,8 +846,10 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         """Get processor from OpenCUA config."""
-        return self.ctx.get_hf_processor(
-            Qwen2_5_VLProcessor,
+        model_path = self.ctx.model_config.model
+        return Qwen2_5_VLProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
