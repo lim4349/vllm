@@ -804,9 +804,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_1d must match Qwen2.5-VL's cu_seqlens_thw format:
-        # This represents the number of patches before merge (h * w)
-        # Note: h and w are already in patch units from grid_thw
-        # This is used for full attention blocks and must be in patch units
+        # This represents the number of patches (h * w) in patch units
+        # seq_len after patch_embed is also in patch units
+        # Therefore, cu_seqlens should be in patch units without scaling
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -840,12 +840,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
         # patchify
-        seq_len, _ = x.size()
-        rotary_pos_emb = []
-        cu_seqlens: list = []
-
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)  # [seq, dim]
+        seq_len, _ = hidden_states.size()  # Get seq_len after patch_embed
+        rotary_pos_emb = []
+        cu_seqlens: list = []
 
         for idx, (t, h, w) in enumerate(grid_thw):
             t, h, w = int(t), int(h), int(w)
@@ -868,9 +867,8 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb = torch.cat(rotary_pos_emb)  # [seq, ...]
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
-        # cu_seqlens_1d is in patch units (h * w), but seq_len is in merge units
-        # Scale by spatial_merge_unit to match actual sequence length
-        cu_seqlens = cu_seqlens * self.spatial_merge_unit
+        # cu_seqlens_1d is in patch units (h * w), and seq_len is also in patch units
+        # No scaling needed - both are in the same units
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # Validation: cu_seqlens[-1] must match seq_len
