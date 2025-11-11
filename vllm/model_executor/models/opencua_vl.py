@@ -817,6 +817,35 @@ class OpenCUA_VisionTransformer(nn.Module):
         return loaded_params
 
 
+class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
+    """Custom processor for OpenCUA that accepts TikTokenV3 tokenizer.
+
+    OpenCUA uses TikTokenV3 tokenizer instead of Qwen2Tokenizer,
+    so we need to bypass the type checking in the parent class.
+    """
+
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        video_processor=None,
+        chat_template=None,
+        **kwargs,
+    ):
+        # Bypass type checking by calling the parent's parent __init__
+        # directly, which skips the tokenizer type validation
+        from transformers.processing_utils import ProcessorMixin
+
+        ProcessorMixin.__init__(
+            self,
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            video_processor=video_processor,
+            chat_template=chat_template,
+            **kwargs,
+        )
+
+
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         config = self.ctx.get_hf_config(OpenCUA_VLConfig)
@@ -842,7 +871,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 }
         return config
 
-    def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> OpenCUA_VLProcessor:
         """Get processor from OpenCUA config.
 
         OpenCUA uses TikTokenV3 tokenizer, so we need to explicitly pass
@@ -867,7 +896,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             )
 
             return self.ctx.init_processor(
-                Qwen2_5_VLProcessor,
+                OpenCUA_VLProcessor,
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
@@ -875,13 +904,23 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 **kwargs,
             )
         except Exception:
-            # Fallback: try to pass tokenizer explicitly to get_hf_processor
-            # This should work if cached_processor_from_config properly
-            # handles tokenizer
-            return self.ctx.get_hf_processor(
-                Qwen2_5_VLProcessor,
+            # Fallback: create processor directly without going through
+            # cached_processor_from_config to avoid tokenizer key issues
+            from transformers import AutoImageProcessor, AutoVideoProcessor
+
+            model_path = self.ctx.model_config.model
+            image_processor = AutoImageProcessor.from_pretrained(
+                model_path, **image_processor_config
+            )
+            video_processor = AutoVideoProcessor.from_pretrained(
+                model_path, **image_processor_config
+            )
+
+            return OpenCUA_VLProcessor(
+                image_processor=image_processor,
+                video_processor=video_processor,
                 tokenizer=tokenizer,
-                use_fast=kwargs.pop("use_fast", True),
+                chat_template=None,
                 **kwargs,
             )
 
