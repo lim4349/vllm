@@ -758,18 +758,15 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
-        llm_grid_h = h // self.spatial_merge_size
-        llm_grid_w = w // self.spatial_merge_size
-        total_tokens = t * llm_grid_h * llm_grid_w
-        rotary_pos_emb_1d_full = self.rotary_pos_emb_1d(total_tokens)
-        rotary_pos_emb_1d = rotary_pos_emb_1d_full.unsqueeze(1).expand(
-            -1, self.spatial_merge_unit, -1
-        )
-        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
+        # Vision transformer processes all patches after patch_embed
+        # Total patches = t * h * w (not t * llm_grid_h * llm_grid_w)
+        # For 1D RoPE, we need position embeddings for each patch in sequence order
+        total_patches = t * h * w
+        rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_patches)
+        # rotary_pos_emb_1d shape: [total_patches, rotary_dim // 2]
         # cu_seqlens_1d should represent the sequence length after patch_embed,
         # which is t * h * w (total patches across all frames)
-        # Return a single value representing total sequence length
-        cu_seqlens_1d = torch.tensor([t * h * w], dtype=torch.int32)
+        cu_seqlens_1d = torch.tensor([total_patches], dtype=torch.int32)
         return rotary_pos_emb_1d, cu_seqlens_1d
 
     def compute_attn_mask_seqlen(
