@@ -784,6 +784,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
+        # Squeeze batch dimension before merger
+        # [seq_len, 1, context_dim] -> [seq_len, context_dim]
+        hidden_states = hidden_states.squeeze(1)
         hidden_states = self.merger(hidden_states)
         return hidden_states
 
