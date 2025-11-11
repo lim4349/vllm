@@ -757,11 +757,14 @@ class OpenCUA_VisionTransformer(nn.Module):
             grid_t, llm_grid_h, llm_grid_w
         )
 
-        # Padding calculation: pad to 0 when remainder is 0
-        remainder_h = llm_grid_h % vit_merger_window_size
-        remainder_w = llm_grid_w % vit_merger_window_size
-        pad_h = 0 if remainder_h == 0 else vit_merger_window_size - remainder_h
-        pad_w = 0 if remainder_w == 0 else vit_merger_window_size - remainder_w
+        # Padding calculation: match Qwen2.5-VL implementation
+        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+        # Handle case where remainder is 0 (no padding needed)
+        if pad_h == vit_merger_window_size:
+            pad_h = 0
+        if pad_w == vit_merger_window_size:
+            pad_w = 0
 
         num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
         num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
