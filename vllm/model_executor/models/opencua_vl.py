@@ -985,20 +985,40 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         tokenizer = self.get_tokenizer()
         image_processor_config = self.ctx.get_hf_image_processor_config()
 
-        # Use AutoImageProcessor and AutoVideoProcessor to avoid import issues
-        # across different transformers versions
+        # Use Qwen2.5-VL processor explicitly to avoid Qwen2-VL processor confusion
+        # OpenCUA is based on Qwen2.5-VL, so we must use Qwen2.5-VL processor
         try:
             from transformers import AutoImageProcessor, AutoVideoProcessor
+            from transformers.models.qwen2_5_vl import (
+                Qwen2_5_VLImageProcessor,
+                Qwen2_5_VLVideoProcessor,
+            )
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
+            # Force use Qwen2.5-VL processor explicitly
+            # This ensures we use the correct processor, not Qwen2-VL
+            try:
+                # Try to load Qwen2.5-VL processor directly
+                image_processor = Qwen2_5_VLImageProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+                video_processor = Qwen2_5_VLVideoProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            except Exception:
+                # Fallback to AutoImageProcessor with processor_class specified
+                image_processor = AutoImageProcessor.from_pretrained(
+                    model_path,
+                    use_fast=False,
+                    processor_class="Qwen2_5_VLImageProcessor",
+                    **image_processor_config,
+                )
+                video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path,
+                    use_fast=False,
+                    processor_class="Qwen2_5_VLVideoProcessor",
+                    **image_processor_config,
+                )
             
             # Log processor type to verify Qwen2.5-VL processor is used
             logger = init_logger(__name__)
@@ -1023,16 +1043,36 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # Fallback: create processor directly without going through
             # cached_processor_from_config to avoid tokenizer key issues
             from transformers import AutoImageProcessor, AutoVideoProcessor
+            from transformers.models.qwen2_5_vl import (
+                Qwen2_5_VLImageProcessor,
+                Qwen2_5_VLVideoProcessor,
+            )
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
+            # Force use Qwen2.5-VL processor explicitly
+            # This ensures we use the correct processor, not Qwen2-VL
+            try:
+                # Try to load Qwen2.5-VL processor directly
+                image_processor = Qwen2_5_VLImageProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+                video_processor = Qwen2_5_VLVideoProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            except Exception:
+                # Fallback to AutoImageProcessor with processor_class specified
+                image_processor = AutoImageProcessor.from_pretrained(
+                    model_path,
+                    use_fast=False,
+                    processor_class="Qwen2_5_VLImageProcessor",
+                    **image_processor_config,
+                )
+                video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path,
+                    use_fast=False,
+                    processor_class="Qwen2_5_VLVideoProcessor",
+                    **image_processor_config,
+                )
             
             # Log processor type to verify Qwen2.5-VL processor is used
             logger = init_logger(__name__)
