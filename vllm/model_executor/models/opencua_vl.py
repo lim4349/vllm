@@ -1401,6 +1401,37 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
                     with contextlib.suppress(AttributeError, TypeError):
                         ctx_tokenizer.chat_template = ctx_tokenizer_chat_template
+
+            # Inject chat_template into vLLM's processor chat template cache
+            # This ensures _try_get_processor_chat_template uses our modified template
+            try:
+                from vllm.entrypoints.chat_utils import _PROCESSOR_CHAT_TEMPLATES
+
+                cache_key = (
+                    opencua_tokenizer.name_or_path,
+                    getattr(self.ctx.model_config, "trust_remote_code", False),
+                )
+                # Store the actual chat_template (string or callable)
+                # _try_get_processor_chat_template will use processor.chat_template
+                # which we've already set above, but we also cache it directly
+                if isinstance(chat_template, str):
+                    _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
+                elif callable(chat_template):
+                    # For callable templates, we need to store a reference
+                    # The cache expects string templates, but we can store
+                    # the callable and let processor.chat_template handle it
+                    _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
+                logger.warning(
+                    "OpenCUA chat_template injected into vLLM cache: "
+                    "cache_key=%s, type=%s",
+                    cache_key,
+                    type(chat_template).__name__,
+                )
+            except ImportError:
+                logger.warning(
+                    "Failed to import _PROCESSOR_CHAT_TEMPLATES, "
+                    "chat_template cache injection skipped."
+                )
         else:
             logger.warning("OpenCUA chat_template not found.")
 
