@@ -1559,7 +1559,10 @@ class OpenCUA_VLForConditionalGeneration(
                 torch.stack([t_index, h_index, w_index]) + visual_start_pos
             )
             llm_pos_ids_list.append(visual_positions)
-            st = ed + 1
+            # After replacement, the placeholder token is replaced with
+            # num_visual_tokens tokens, so we need to skip that many tokens
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
