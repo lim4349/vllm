@@ -628,8 +628,6 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.use_data_parallel = use_data_parallel
         self.out_hidden_size = vision_config.out_hidden_size
 
-        # args for get_window_index_thw
-        self.window_size = vision_config.window_size
         self.patch_size = vision_config.patch_size
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
@@ -845,12 +843,43 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         return config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        """Get processor from OpenCUA config."""
-        return self.ctx.get_hf_processor(
-            Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
-        )
+        """Get processor from OpenCUA config.
+
+        OpenCUA uses TikTokenV3 tokenizer, so we need to explicitly pass
+        the tokenizer to avoid loading issues with Qwen2Tokenizer.
+        """
+        # Use init_processor to explicitly pass tokenizer to avoid
+        # tokenizer loading issues (OpenCUA uses TikTokenV3, not Qwen2Tokenizer)
+        tokenizer = self.get_tokenizer()
+        image_processor_config = self.ctx.get_hf_image_processor_config()
+
+        # Try to get processor using init_processor with explicit tokenizer
+        # This avoids the issue where Qwen2_5_VLProcessor.from_pretrained
+        # tries to load Qwen2Tokenizer instead of TikTokenV3
+        try:
+            from transformers.models.qwen2_5_vl import (
+                Qwen2_5_VLImageProcessor,
+                Qwen2_5_VLVideoProcessor,
+            )
+
+            image_processor = Qwen2_5_VLImageProcessor(**image_processor_config)
+            video_processor = Qwen2_5_VLVideoProcessor(**image_processor_config)
+
+            return self.ctx.init_processor(
+                Qwen2_5_VLProcessor,
+                image_processor=image_processor,
+                video_processor=video_processor,
+                tokenizer=tokenizer,
+                chat_template=None,
+                **kwargs,
+            )
+        except Exception:
+            # Fallback to default method if init_processor fails
+            return self.ctx.get_hf_processor(
+                Qwen2_5_VLProcessor,
+                use_fast=kwargs.pop("use_fast", True),
+                **kwargs,
+            )
 
 
 class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
