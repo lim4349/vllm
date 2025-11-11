@@ -877,7 +877,8 @@ class OpenCUA_VisionTransformer(nn.Module):
             t, h, w = int(t), int(h), int(w)
             # 6. Processor/grid_thw unit verification: log to confirm patch units
             # grid_thw must be in patch units (not pixels)
-            # If in pixels, values would be much larger and not divisible
+            # Verify grid_thw is in patch units
+            # (must be divisible by spatial_merge_size)
             if h % self.spatial_merge_size != 0 or w % self.spatial_merge_size != 0:
                 raise ValueError(
                     f"grid_thw[{idx}] values (h={h}, w={w}) must be in patch units, "
@@ -885,19 +886,6 @@ class OpenCUA_VisionTransformer(nn.Module):
                     f"spatial_merge_size={self.spatial_merge_size}. "
                     f"This suggests grid_thw is in pixels instead of patches, "
                     f"which will break token alignment and spatial structure."
-                )
-            # Log grid_thw values for verification (first item only to avoid spam)
-            if idx == 0:
-                logger.warning(
-                    "OpenCUA grid_thw[0] verification: t=%d, h=%d, w=%d "
-                    "(patch units), spatial_merge_size=%d, "
-                    "llm_grid_h=%d, llm_grid_w=%d",
-                    t,
-                    h,
-                    w,
-                    self.spatial_merge_size,
-                    h // self.spatial_merge_size,
-                    w // self.spatial_merge_size,
                 )
             llm_h = h // self.spatial_merge_size
             llm_w = w // self.spatial_merge_size
@@ -1139,16 +1127,6 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # add them from Qwen2.5-VL processor
             qwen_image_processor = processor.image_processor
 
-            # Log image processor parameters for verification
-            logger.warning(
-                "OpenCUA image processor loaded: size=%s, "
-                "image_mean=%s, image_std=%s, interpolation=%s",
-                getattr(opencua_image_processor, "size", None),
-                getattr(opencua_image_processor, "image_mean", None),
-                getattr(opencua_image_processor, "image_std", None),
-                getattr(opencua_image_processor, "resample", None),
-            )
-
             # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels,
             # 3) OpenCUA's max_pixels
             target_max_pixels = None
@@ -1317,19 +1295,6 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         # Set chat_template to processor
         if chat_template:
-            # Log chat template for verification
-            if isinstance(chat_template, str):
-                logger.warning(
-                    "OpenCUA chat_template loaded (length=%d, first_100_chars=%s)",
-                    len(chat_template),
-                    chat_template[:100] if len(chat_template) > 100 else chat_template,
-                )
-            else:
-                logger.warning(
-                    "OpenCUA chat_template loaded (type=%s)",
-                    type(chat_template).__name__,
-                )
-
             # Optionally inject system prompt from environment variable
             import os
 
@@ -1411,29 +1376,10 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                     opencua_tokenizer.name_or_path,
                     getattr(self.ctx.model_config, "trust_remote_code", False),
                 )
-                # Store the actual chat_template (string or callable)
-                # _try_get_processor_chat_template will use processor.chat_template
-                # which we've already set above, but we also cache it directly
-                if isinstance(chat_template, str):
+                if isinstance(chat_template, str) or callable(chat_template):
                     _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
-                elif callable(chat_template):
-                    # For callable templates, we need to store a reference
-                    # The cache expects string templates, but we can store
-                    # the callable and let processor.chat_template handle it
-                    _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
-                logger.warning(
-                    "OpenCUA chat_template injected into vLLM cache: "
-                    "cache_key=%s, type=%s",
-                    cache_key,
-                    type(chat_template).__name__,
-                )
             except ImportError:
-                logger.warning(
-                    "Failed to import _PROCESSOR_CHAT_TEMPLATES, "
-                    "chat_template cache injection skipped."
-                )
-        else:
-            logger.warning("OpenCUA chat_template not found.")
+                pass
 
         # Validate all required special tokens exist and are not UNK
         im_tokens = ["<|im_user|>", "<|im_assistant|>", "<|im_end|>"]
@@ -1577,18 +1523,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             # grid_thw shape: (t, h, w) - temporal, height, width in patches
             # num_tokens = (t×h×w) // merge_length
             grid_t, grid_h, grid_w = map(int, grid_thw)
-            # 6. Processor/grid_thw unit verification: log to confirm patch units
-            logger.warning(
-                "OpenCUA %s item %d: grid_thw=[%d, %d, %d] (patch units), "
-                "merge_size=%d, merge_length=%d",
-                modality.upper(),
-                item_idx,
-                grid_t,
-                grid_h,
-                grid_w,
-                image_processor.merge_size,
-                merge_length,
-            )
             total_patches = grid_t * grid_h * grid_w
             num_tokens = total_patches // merge_length
 
@@ -1596,22 +1530,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
                 f"(grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
                 f"total_patches={total_patches}, merge_length={merge_length}). "
-                f"This will break text recognition. "
                 f"Check image processing configuration."
-            )
-
-            # Log placeholder count vs visual token count for validation
-            # This is called during _bind_and_group_updates -> resolve(item_idx)
-            logger.warning(
-                "OpenCUA %s item %d: placeholder_count=1, visual_token_count=%d, "
-                "grid_thw=[%d, %d, %d], merge_length=%d",
-                modality.upper(),
-                item_idx,
-                num_tokens,
-                grid_t,
-                grid_h,
-                grid_w,
-                merge_length,
             )
 
             return [replacement_token_id[modality]] * num_tokens
@@ -2129,28 +2048,16 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(text_positions)
 
             # Visual tokens: 1D sequential positions (all dimensions same)
-            # Position starts after text tokens (including placeholder)
+            # Position starts after text tokens (placeholder replaced by visual)
             # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
-            # Match Qwen2.5-VL exactly: visual position = text_len + st_idx
-            visual_start_pos = text_len + st_idx
+            # OpenCUA: placeholder is at position st_idx + text_len - 1,
+            # visual starts after it
+            visual_start_pos = st_idx + text_len
             visual_positions = (
                 torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
                 + visual_start_pos
             )
             llm_pos_ids_list.append(visual_positions)
-
-            # Log position calculation for debugging
-            logger.warning(
-                "OpenCUA position calc: text_len=%d, st_idx=%d, "
-                "visual_start_pos=%d, num_visual_tokens=%d, "
-                "visual_pos_range=[%d, %d]",
-                text_len,
-                st_idx,
-                visual_start_pos,
-                num_visual_tokens,
-                visual_start_pos,
-                visual_start_pos + num_visual_tokens - 1,
-            )
 
             # Skip the placeholder token in input_tokens
             # (placeholder is replaced by num_visual_tokens visual embeddings
