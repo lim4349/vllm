@@ -571,76 +571,21 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
-        # Normalize first
+        # OpenCUA uses 1D RoPE, so vision transformer output is
+        # already in 1D order. Use simple reshape like Qwen2.5-VL.
         x = self.ln_q(x)
-
-        # Check if input is already merged or unmerged
-        # merged_dim = context_dim * spatial_merge_size^2
-        C = self.context_dim
-        m = self.spatial_merge_size
-        merged_dim = C * (m**2)
-
-        # Ensure x is 2D
-        if x.ndim != 2:
-            x = x.reshape(-1, x.shape[-1])
-
-        # If already merged [num_tokens, context_dim*m*m], pass through
-        if x.shape[-1] == merged_dim:
-            # Already merged: no additional rearrangement needed
-            return self.mlp(x)
-
-        # Still unmerged [t*h*w, C]: perform block merge with spatial order
-        assert x.shape[-1] == C, (
-            f"Unexpected hidden size: {x.shape[-1]} != {C}. "
-            f"Expected either {C} (unmerged) or {merged_dim} (merged)"
-        )
-        assert (
-            grid_thw is not None and len(grid_thw) > 0
-        ), "grid_thw is required for merging unmerged patches"
-
-        out_chunks = []
-        start = 0
-        for t, h, w in grid_thw:
-            t, h, w = int(t), int(h), int(w)
-            n = t * h * w
-            xi = x[start : start + n]  # [t*h*w, C]
-            start += n
-
-            # Reshape to [t, h, w, C] then merge m×m blocks using unfold
-            # unfold ensures correct spatial order for merging
-            assert (
-                h % m == 0 and w % m == 0
-            ), f"h={h}, w={w} must be divisible by merge_size={m}"
-            
-            # Reshape to spatial grid: [t*h*w, C] -> [t, h, w, C]
-            xi = xi.reshape(t, h, w, C)
-            
-            # For each temporal frame, apply spatial merge using unfold
-            # This ensures correct spatial order (row-major within each m×m block)
-            merged_frames = []
-            for frame_idx in range(t):
-                frame_tokens = xi[frame_idx]  # [h, w, C]
-                # Permute to [C, h, w] for unfold
-                frame_tokens = frame_tokens.permute(2, 0, 1).unsqueeze(0)
-                # Use unfold to extract spatial_merge_size x
-                # spatial_merge_size blocks in correct spatial order
-                grid = torch.nn.functional.unfold(
-                    frame_tokens,
-                    kernel_size=m,
-                    stride=m,
-                )
-                # Reshape: [C * m^2, num_blocks] -> [num_blocks, C * m^2]
-                grid = grid.view(C * (m**2), -1).t()
-                merged_frames.append(grid)
-            
-            # Concatenate all frames
-            merged_tokens = torch.cat(merged_frames, dim=0)
-            out_chunks.append(merged_tokens)
-
-        x = torch.cat(out_chunks, dim=0)  # [num_merged_tokens, C*m*m]
-
-        # MLP projection
-        return self.mlp(x)
+        
+        # Qwen2.5-VL style: simple view reshape
+        # The vision transformer with 1D RoPE outputs patches in
+        # sequential order. We need to reshape to
+        # [num_merged_tokens, hidden_size] where
+        # hidden_size = context_dim * spatial_merge_size^2
+        # This groups spatial_merge_size^2 patches together
+        # Ensure contiguous memory layout for better performance
+        x = x.contiguous().view(-1, self.hidden_size)
+        
+        out = self.mlp(x)
+        return out
 
 
 class OpenCUA_VisionRotaryEmbedding(nn.Module):
