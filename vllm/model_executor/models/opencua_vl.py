@@ -844,7 +844,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 }
         return config
 
-    def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+    def get_hf_processor(self, **kwargs: object):
         """Get processor from OpenCUA config."""
         from vllm.transformers_utils.processor import cached_image_processor_from_config
 
