@@ -921,12 +921,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 model_path, **image_processor_config
             )
 
+            # OpenCUA uses its own chat template from tokenizer
+            # Don't override it, let the processor use the tokenizer's default
             return self.ctx.init_processor(
                 OpenCUA_VLProcessor,
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
-                chat_template=None,
                 **kwargs,
             )
         except Exception:
@@ -942,11 +943,12 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 model_path, **image_processor_config
             )
 
+            # OpenCUA uses its own chat template from tokenizer
+            # Don't override it, let the processor use the tokenizer's default
             return OpenCUA_VLProcessor(
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
-                chat_template=None,
                 **kwargs,
             )
 
@@ -1527,14 +1529,34 @@ class OpenCUA_VLForConditionalGeneration(
             llm_grid_h = h // spatial_merge_size
             llm_grid_w = w // spatial_merge_size
             text_len = ed - st
-            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             llm_pos_ids_list.append(text_positions)
             visual_start_pos = st_idx + text_len
+
+            # OpenCUA uses 1D RoPE for vision transformer, but language model
+            # MRoPE still expects 3D positions. Generate proper 3D positions
+            # for visual tokens (t, h, w dimensions)
+            t_index = (
+                torch.arange(llm_grid_t)
+                .view(-1, 1)
+                .expand(-1, llm_grid_h * llm_grid_w)
+                .flatten()
+            )
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
             visual_positions = (
-                torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
-                + visual_start_pos
+                torch.stack([t_index, h_index, w_index]) + visual_start_pos
             )
             llm_pos_ids_list.append(visual_positions)
             st = ed + 1
