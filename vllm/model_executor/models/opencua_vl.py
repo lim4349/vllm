@@ -739,53 +739,26 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def get_window_index_1d(self, grid_t, grid_h, grid_w):
-        """Window indexing for 1D RoPE with proper padding calculation.
+        """Simplified window indexing for 1D RoPE.
 
-        Even though we use 1D RoPE, we still need window attention structure
-        for proper vision transformer operation.
+        For 1D RoPE, we use simple sequential indexing.
+        This matches the original OpenCUA implementation.
         """
-        # Calculate vit_merger_window_size (same as Qwen2.5-VL)
-        # window_size is in pixels, we need to convert to merge tokens
-        vit_merger_window_size = (
-            self.window_size // self.spatial_merge_size // self.patch_size
-        )
-
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
-        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
-            grid_t, llm_grid_h, llm_grid_w
+        total_tokens = grid_t * llm_grid_h * llm_grid_w
+
+        # Simple sequential indexing for 1D RoPE
+        index = torch.arange(total_tokens)
+
+        # cu_seqlens_window is cumulative sequence length for window attention
+        # Each merge token group has spatial_merge_unit tokens
+        # Total sequence length is total_tokens * spatial_merge_unit
+        cu_seqlens = torch.tensor(
+            [0, total_tokens * self.spatial_merge_unit], dtype=torch.int32
         )
 
-        # Padding calculation: pad to 0 when remainder is 0
-        remainder_h = llm_grid_h % vit_merger_window_size
-        remainder_w = llm_grid_w % vit_merger_window_size
-        pad_h = 0 if remainder_h == 0 else vit_merger_window_size - remainder_h
-        pad_w = 0 if remainder_w == 0 else vit_merger_window_size - remainder_w
-
-        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
-        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
-        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
-        index_padded = index_padded.reshape(
-            grid_t,
-            num_windows_h,
-            vit_merger_window_size,
-            num_windows_w,
-            vit_merger_window_size,
-        )
-        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
-            grid_t,
-            num_windows_h * num_windows_w,
-            vit_merger_window_size,
-            vit_merger_window_size,
-        )
-        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
-        index_padded = index_padded.reshape(-1)
-        index_new = index_padded[index_padded != -100]
-        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
-        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
-        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
-
-        return index_new, cu_seqlens_tmp
+        return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
