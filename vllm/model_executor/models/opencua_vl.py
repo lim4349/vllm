@@ -717,9 +717,10 @@ class OpenCUA_VisionTransformer(nn.Module):
             -1, self.spatial_merge_unit, -1
         )
         rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
-        cu_seqlens_1d = torch.repeat_interleave(
-            torch.tensor([h * w], dtype=torch.int32), t
-        )
+        # cu_seqlens_1d should represent the sequence length after patch_embed,
+        # which is t * h * w (total patches across all frames)
+        # Return a single value representing total sequence length
+        cu_seqlens_1d = torch.tensor([t * h * w], dtype=torch.int32)
         return rotary_pos_emb_1d, cu_seqlens_1d
 
     def compute_attn_mask_seqlen(
