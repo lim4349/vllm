@@ -929,34 +929,13 @@ class OpenCUA_VisionTransformer(nn.Module):
                     seqlens=seqlens_full,
                 )
             else:
-                # -------- Window Attention: 이 블록 "안에서만" 재정렬 --------
-                hs = hidden_states.reshape(
-                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-                )  # [N, merge_unit, dim]
-                hs = hs[window_index, :, :].reshape(seq_len, -1)  # gather
-                hs = hs.unsqueeze(1)
-
-                rpe = rotary_pos_emb.reshape(
-                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-                )
-                # 동일 인덱스로 RPE도 재정렬
-                rpe = rpe[window_index, :, :].reshape(seq_len, -1)
-
-                hs = blk(
-                    hs,
+                hidden_states = blk(
+                    hidden_states,
                     cu_seqlens=cu_window_seqlens,
-                    rotary_pos_emb=rpe,
+                    rotary_pos_emb=rotary_pos_emb,
                     max_seqlen=max_seqlen_window,
                     seqlens=seqlens_window,
                 )
-
-                # 원래 순서로 복원
-                hs = hs.squeeze(1)
-                hs = hs.reshape(
-                    seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-                )
-                hs = hs[reverse_indices, :, :].reshape(seq_len, -1).unsqueeze(1)
-                hidden_states = hs
 
         # For OpenCUA-VL, float16 will overflow at last block
         # for long visual tokens sequences.
