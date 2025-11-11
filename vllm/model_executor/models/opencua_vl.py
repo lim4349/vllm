@@ -1615,10 +1615,10 @@ class OpenCUA_VLForConditionalGeneration(
             )
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens, so we need to skip the placeholder token (ed)
-            # and the visual tokens (num_visual_tokens)
+            # num_visual_tokens tokens. The next text starts after these visual tokens.
+            # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            st = ed + 1 + num_visual_tokens
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
