@@ -1678,18 +1678,27 @@ class OpenCUA_VLForConditionalGeneration(
             # visual_positions start after text_len tokens
             # This matches Qwen2.5-VL logic: visual_positions = positions + text_len + st_idx
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            
+            # Calculate the starting position for visual tokens
+            # After text positions, visual tokens start at text_len + st_idx
+            visual_start_pos = text_len + st_idx
             visual_positions = (
-                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                torch.stack([t_index, h_index, w_index]) + visual_start_pos
             )
             
             # Logging
             logger.info(
                 "OpenCUA MRoPE visual - visual_positions shape: %s, "
-                "visual_positions min: %d, max: %d, num_visual_tokens: %d",
+                "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
+                "visual_start_pos: %d, t_index max: %d, h_index max: %d, w_index max: %d",
                 str(visual_positions.shape),
                 visual_positions.min().item(),
                 visual_positions.max().item(),
                 num_visual_tokens,
+                visual_start_pos,
+                t_index.max().item(),
+                h_index.max().item(),
+                w_index.max().item(),
             )
             
             llm_pos_ids_list.append(visual_positions)
@@ -1710,6 +1719,15 @@ class OpenCUA_VLForConditionalGeneration(
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             text_positions = torch.arange(text_len) + st_idx
+            
+            # Logging
+            logger.info(
+                "OpenCUA MRoPE remaining text - st: %d, len(input_tokens): %d, "
+                "text_len: %d, st_idx: %d, text_positions min: %d, max: %d",
+                st, len(input_tokens), text_len, st_idx,
+                text_positions.min().item(), text_positions.max().item(),
+            )
+            
             llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
