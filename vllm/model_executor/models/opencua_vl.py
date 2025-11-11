@@ -1581,10 +1581,18 @@ class OpenCUA_VLForConditionalGeneration(
             llm_grid_t = t
             llm_grid_h = h // spatial_merge_size
             llm_grid_w = w // spatial_merge_size
+            # text_len should exclude the placeholder token at position ed
+            # because placeholder token is replaced with visual tokens
             text_len = ed - st
+            if text_len > 0:
+                # Exclude placeholder token from text positions
+                text_len = text_len - 1
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-            llm_pos_ids_list.append(text_positions)
+            if text_len > 0:
+                text_positions = (
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                )
+                llm_pos_ids_list.append(text_positions)
 
             # OpenCUA uses 1D RoPE for vision transformer, but language model
             # MRoPE still expects 3D positions. Generate proper 3D positions
