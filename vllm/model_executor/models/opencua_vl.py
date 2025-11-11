@@ -845,14 +845,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         """Get processor from OpenCUA config."""
-        from transformers import AutoProcessor
+        from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 
         model_path = self.ctx.model_config.model
-        processor = AutoProcessor.from_pretrained(
+        processor = Qwen2_5_VLProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
             **kwargs,
         )
+        processor.tokenizer = self.get_tokenizer()
         return processor
 
 
