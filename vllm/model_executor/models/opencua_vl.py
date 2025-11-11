@@ -1578,12 +1578,9 @@ class OpenCUA_VLForConditionalGeneration(
             llm_grid_t = t
             llm_grid_h = h // spatial_merge_size
             llm_grid_w = w // spatial_merge_size
-            # text_len should exclude the placeholder token at position ed
-            # because placeholder token is replaced with visual tokens
+            # text_len includes all text tokens before the placeholder token
+            # The placeholder token at position ed will be replaced with visual tokens
             text_len = ed - st
-            if text_len > 0:
-                # Exclude placeholder token from text positions
-                text_len = text_len - 1
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             if text_len > 0:
                 text_positions = (
@@ -1612,15 +1609,16 @@ class OpenCUA_VLForConditionalGeneration(
                 .expand(llm_grid_t, llm_grid_h, -1)
                 .flatten()
             )
-            # Match Qwen2.5-VL: visual_positions = ... + text_len + st_idx
+            # visual_positions start after text_len tokens
             visual_positions = (
                 torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
             llm_pos_ids_list.append(visual_positions)
-            # After replacement, the placeholder token is replaced with
-            # num_visual_tokens tokens, so we need to skip that many tokens
+            # After replacement, the placeholder token at position ed is replaced with
+            # num_visual_tokens tokens, so we need to skip the placeholder token (ed)
+            # and the visual tokens (num_visual_tokens)
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            st = ed + num_visual_tokens
+            st = ed + 1 + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
