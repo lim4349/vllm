@@ -743,12 +743,19 @@ class OpenCUA_VisionTransformer(nn.Module):
 
         OpenCUA uses simple sequential indexing without window structure
         for faster processing and correct Korean output.
+
+        Note: cu_seqlens must be scaled by spatial_merge_unit for window
+        attention path to match the actual sequence length in patches.
         """
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
         num_tokens = grid_t * llm_grid_h * llm_grid_w
         index = torch.arange(num_tokens)
-        cu_seqlens = torch.tensor([num_tokens], dtype=torch.int32)
+        # Scale by spatial_merge_unit to match actual patch sequence length
+        # This is needed for window attention path
+        cu_seqlens = torch.tensor(
+            [num_tokens * self.spatial_merge_unit], dtype=torch.int32
+        )
         return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
