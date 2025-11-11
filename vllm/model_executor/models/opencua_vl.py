@@ -1585,7 +1585,6 @@ class OpenCUA_VLForConditionalGeneration(
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_positions = torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             llm_pos_ids_list.append(text_positions)
-            visual_start_pos = st_idx + text_len
 
             # OpenCUA uses 1D RoPE for vision transformer, but language model
             # MRoPE still expects 3D positions. Generate proper 3D positions
@@ -1608,15 +1607,15 @@ class OpenCUA_VLForConditionalGeneration(
                 .expand(llm_grid_t, llm_grid_h, -1)
                 .flatten()
             )
+            # Match Qwen2.5-VL: visual_positions = ... + text_len + st_idx
             visual_positions = (
-                torch.stack([t_index, h_index, w_index]) + visual_start_pos
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
             llm_pos_ids_list.append(visual_positions)
-            # st should be updated in the original token sequence (before replacement)
-            # The placeholder token at position ed will be replaced with
-            # num_visual_tokens, but for finding the next placeholder,
-            # we need to move to ed + 1 in the original sequence
-            st = ed + 1
+            # After replacement, the placeholder token is replaced with
+            # num_visual_tokens tokens, so we need to skip that many tokens
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
