@@ -571,53 +571,18 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
+        # OpenCUA uses 1D RoPE, so vision transformer output is
+        # already in 1D order. Use simple reshape like Qwen2.5-VL.
         x = self.ln_q(x)
-
-        # Reshape patches in correct spatial order for spatial merge
-        if grid_thw is not None:
-            permuted_tensor = []
-            start_idx = 0
-            for t, h, w in grid_thw:
-                t, h, w = int(t), int(h), int(w)
-                num_patches = t * h * w
-                end_idx = start_idx + num_patches
-
-                # Get patches for this image/video
-                image_tokens = x[start_idx:end_idx]
-
-                # Reshape to spatial grid: [t*h*w, d] -> [t, h, w, d]
-                image_grid = image_tokens.view(t, h, w, self.context_dim)
-
-                # For each temporal frame, apply spatial merge
-                merged_frames = []
-                for frame_idx in range(t):
-                    frame_tokens = image_grid[frame_idx]  # [h, w, d]
-                    # Permute to [d, h, w] for unfold
-                    frame_tokens = frame_tokens.permute(2, 0, 1).unsqueeze(0)
-                    # Use unfold to extract spatial_merge_size x
-                    # spatial_merge_size blocks
-                    grid = torch.nn.functional.unfold(
-                        frame_tokens,
-                        kernel_size=self.spatial_merge_size,
-                        stride=self.spatial_merge_size,
-                    )
-                    # Reshape: [d * spatial_merge_size^2, num_blocks]
-                    # -> [num_blocks, d * spatial_merge_size^2]
-                    grid = grid.view(
-                        self.context_dim * self.spatial_merge_size**2, -1
-                    ).t()
-                    merged_frames.append(grid)
-
-                # Concatenate all frames
-                merged_tokens = torch.cat(merged_frames, dim=0)
-                permuted_tensor.append(merged_tokens)
-                start_idx = end_idx
-
-            x = torch.cat(permuted_tensor, dim=0)
-        else:
-            # Fallback: simple view (may not preserve spatial order)
-            x = x.view(-1, self.hidden_size)
-
+        
+        # Qwen2.5-VL style: simple view reshape
+        # The vision transformer with 1D RoPE outputs patches in
+        # sequential order. We need to reshape to
+        # [num_merged_tokens, hidden_size] where
+        # hidden_size = context_dim * spatial_merge_size^2
+        # This groups spatial_merge_size^2 patches together
+        x = x.view(-1, self.hidden_size)
+        
         out = self.mlp(x)
         return out
 
