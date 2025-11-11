@@ -1140,13 +1140,6 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = opencua_tokenizer
 
-        # CRITICAL: Replace ctx.tokenizer with OpenCUA tokenizer
-        # This ensures vLLM uses the correct tokenizer with chat_template
-        # ctx.tokenizer is used by resolve_hf_chat_template and other vLLM functions
-        if hasattr(self.ctx, "tokenizer"):
-            # Store reference to original if needed, but replace with OpenCUA tokenizer
-            self.ctx.tokenizer = opencua_tokenizer
-
         # Get OpenCUA config for token IDs
         hf_config = self.get_hf_config()
 
@@ -1332,7 +1325,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
             # Also set chat_template on tokenizer for vLLM's resolve_hf_chat_template
             # This ensures the chat template is used even if processor is cached
-            # Set on both opencua_tokenizer and ctx.tokenizer
+            # Set on opencua_tokenizer (which is now processor.tokenizer)
             if hasattr(opencua_tokenizer, "chat_template"):
                 if isinstance(chat_template, str):
                     opencua_tokenizer.chat_template = chat_template
@@ -1343,17 +1336,27 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
                     opencua_tokenizer.chat_template = tokenizer_chat_template
 
-            # Also set on ctx.tokenizer which is used by vLLM
+            # Also set on ctx.tokenizer if it's different from opencua_tokenizer
+            # Note: ctx.tokenizer is frozen, so we can't modify it directly
+            # But processor.tokenizer is set to opencua_tokenizer, and
+            # resolve_hf_chat_template checks processor.chat_template first
+            # If ctx.tokenizer is the same object, it will already have chat_template
             ctx_tokenizer = self.ctx.tokenizer
-            if hasattr(ctx_tokenizer, "chat_template"):
+            if ctx_tokenizer is not opencua_tokenizer and hasattr(
+                ctx_tokenizer, "chat_template"
+            ):
+                import contextlib
+
                 if isinstance(chat_template, str):
-                    ctx_tokenizer.chat_template = chat_template
+                    with contextlib.suppress(AttributeError, TypeError):
+                        ctx_tokenizer.chat_template = chat_template
                 elif callable(chat_template):
-                    # If it's a callable, wrap it for tokenizer
+
                     def ctx_tokenizer_chat_template(messages, tokenizer, **kwargs):
                         return chat_template(messages, tokenizer, **kwargs)
 
-                    ctx_tokenizer.chat_template = ctx_tokenizer_chat_template
+                    with contextlib.suppress(AttributeError, TypeError):
+                        ctx_tokenizer.chat_template = ctx_tokenizer_chat_template
         else:
             logger.warning("OpenCUA chat_template not found.")
 
