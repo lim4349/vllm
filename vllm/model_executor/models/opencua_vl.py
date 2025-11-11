@@ -847,6 +847,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         """Get processor from OpenCUA config."""
         from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
         from transformers.models.qwen2_vl import Qwen2VLImageProcessor
+        from transformers.processing_utils import ProcessorMixin
 
         model_path = self.ctx.model_config.model
         tokenizer = self.get_tokenizer()
@@ -855,10 +856,8 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             trust_remote_code=True,
             **kwargs,
         )
-        processor = Qwen2_5_VLProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-        )
+        processor = object.__new__(Qwen2_5_VLProcessor)
+        ProcessorMixin.__init__(processor, image_processor, tokenizer)
         return processor
 
 
