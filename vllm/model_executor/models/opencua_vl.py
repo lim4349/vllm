@@ -606,18 +606,35 @@ class OpenCUA_VisionPatchMerger(nn.Module):
             xi = x[start : start + n]  # [t*h*w, C]
             start += n
 
-            # Reshape to [t, h, w, C] then merge m×m blocks
+            # Reshape to [t, h, w, C] then merge m×m blocks using unfold
+            # This ensures correct spatial order for merging
             assert (
                 h % m == 0 and w % m == 0
             ), f"h={h}, w={w} must be divisible by merge_size={m}"
-            # [t, h, w, C] -> [t, h//m, m, w//m, m, C]
+            
+            # Reshape to spatial grid: [t*h*w, C] -> [t, h, w, C]
             xi = xi.reshape(t, h, w, C)
-            xi = xi.reshape(t, h // m, m, w // m, m, C)
-            # Permute to group m×m blocks: [t, h//m, w//m, m, m, C]
-            xi = xi.permute(0, 1, 3, 2, 4, 5).contiguous()
-            # Flatten to [t*(h//m)*(w//m), C*m*m]
-            xi = xi.reshape(-1, merged_dim)
-            out_chunks.append(xi)
+            
+            # For each temporal frame, apply spatial merge using unfold
+            merged_frames = []
+            for frame_idx in range(t):
+                frame_tokens = xi[frame_idx]  # [h, w, C]
+                # Permute to [C, h, w] for unfold
+                frame_tokens = frame_tokens.permute(2, 0, 1).unsqueeze(0)
+                # Use unfold to extract spatial_merge_size x
+                # spatial_merge_size blocks in correct spatial order
+                grid = torch.nn.functional.unfold(
+                    frame_tokens,
+                    kernel_size=m,
+                    stride=m,
+                )
+                # Reshape: [C * m^2, num_blocks] -> [num_blocks, C * m^2]
+                grid = grid.view(C * (m**2), -1).t()
+                merged_frames.append(grid)
+            
+            # Concatenate all frames
+            merged_tokens = torch.cat(merged_frames, dim=0)
+            out_chunks.append(merged_tokens)
 
         x = torch.cat(out_chunks, dim=0)  # [num_merged_tokens, C*m*m]
 
