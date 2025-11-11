@@ -757,14 +757,14 @@ class OpenCUA_VisionTransformer(nn.Module):
             grid_t, llm_grid_h, llm_grid_w
         )
 
-        # Padding calculation: match Qwen2.5-VL implementation
-        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
-        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
-        # Handle case where remainder is 0 (no padding needed)
-        if pad_h == vit_merger_window_size:
-            pad_h = 0
-        if pad_w == vit_merger_window_size:
-            pad_w = 0
+        # Padding calculation: use modular arithmetic for safety
+        # This ensures remainder=0 case is handled consistently
+        pad_h = (
+            vit_merger_window_size - (llm_grid_h % vit_merger_window_size)
+        ) % vit_merger_window_size
+        pad_w = (
+            vit_merger_window_size - (llm_grid_w % vit_merger_window_size)
+        ) % vit_merger_window_size
 
         num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
         num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
@@ -867,6 +867,18 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_window_seqlens_last = 0
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
+            # CRITICAL: grid_thw must be in patch units (not pixels)
+            # Verify: h and w should be divisible by spatial_merge_size
+            # if in patch units. If they're in pixels, they would be much
+            # larger and not divisible.
+            if h % self.spatial_merge_size != 0 or w % self.spatial_merge_size != 0:
+                raise ValueError(
+                    f"grid_thw values (h={h}, w={w}) must be in patch units, "
+                    f"but are not divisible by "
+                    f"spatial_merge_size={self.spatial_merge_size}. "
+                    f"This suggests grid_thw is in pixels instead of patches, "
+                    f"which will break token alignment and spatial structure."
+                )
             llm_h = h // self.spatial_merge_size
             llm_w = w // self.spatial_merge_size
 
@@ -2045,6 +2057,7 @@ class OpenCUA_VLForConditionalGeneration(
             text_len = ed - st
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
+            # Calculate st_idx after text_len (match Qwen2.5-VL order)
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
             # Text tokens: 1D sequential positions (all dimensions same)
@@ -2055,6 +2068,7 @@ class OpenCUA_VLForConditionalGeneration(
             # Visual tokens: 1D sequential positions (all dimensions same)
             # Position starts after text tokens (including placeholder)
             # For 1D RoPE, all dimensions (T, H, W) use the same sequential position
+            # Match Qwen2.5-VL: visual position = text_len + st_idx
             visual_positions = (
                 torch.arange(num_visual_tokens).view(1, -1).expand(3, -1)
                 + text_len
