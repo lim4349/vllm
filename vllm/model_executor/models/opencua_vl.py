@@ -991,11 +991,23 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
+            # Force use_fast=False to ensure consistent preprocessing
+            # OpenCUA requires slow processor to match original behavior
             image_processor = AutoImageProcessor.from_pretrained(
-                model_path, **image_processor_config
+                model_path, use_fast=False, **image_processor_config
             )
             video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, **image_processor_config
+                model_path, use_fast=False, **image_processor_config
+            )
+            
+            # Log processor type to verify Qwen2.5-VL processor is used
+            logger = init_logger(__name__)
+            logger.info(
+                "OpenCUA image processor loaded - type: %s, use_fast: %s, "
+                "merge_size: %s",
+                type(image_processor).__name__,
+                getattr(image_processor, "use_fast", "N/A"),
+                getattr(image_processor, "merge_size", "N/A"),
             )
 
             # OpenCUA uses its own chat template from tokenizer
@@ -1013,11 +1025,23 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
+            # Force use_fast=False to ensure consistent preprocessing
+            # OpenCUA requires slow processor to match original behavior
             image_processor = AutoImageProcessor.from_pretrained(
-                model_path, **image_processor_config
+                model_path, use_fast=False, **image_processor_config
             )
             video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, **image_processor_config
+                model_path, use_fast=False, **image_processor_config
+            )
+            
+            # Log processor type to verify Qwen2.5-VL processor is used
+            logger = init_logger(__name__)
+            logger.info(
+                "OpenCUA image processor loaded (fallback) - type: %s, "
+                "use_fast: %s, merge_size: %s",
+                type(image_processor).__name__,
+                getattr(image_processor, "use_fast", "N/A"),
+                getattr(image_processor, "merge_size", "N/A"),
             )
 
             # OpenCUA uses its own chat template from tokenizer
@@ -1074,10 +1098,40 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         media_placeholder_id = vocab[image_token]
 
         hf_config = self.info.get_hf_config()
+        
+        # Log token synchronization for debugging
+        logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA token IDs synced with tokenizer - "
+            "media_placeholder_token_id: %d, image_token_id: %d, "
+            "video_token_id: %d, image_token: '%s'",
+            media_placeholder_id,
+            media_placeholder_id,
+            media_placeholder_id,
+            image_token,
+        )
+        
+        # Verify token exists in vocab
+        if image_token not in vocab:
+            raise ValueError(
+                f"Token '{image_token}' not found in tokenizer vocab. "
+                f"Available tokens: {list(vocab.keys())[:10]}..."
+            )
+        
+        # Verify token ID matches
+        token_id_from_vocab = vocab[image_token]
+        if token_id_from_vocab != media_placeholder_id:
+            logger.warning(
+                "Token ID mismatch - vocab[%s] = %d, but using %d",
+                image_token, token_id_from_vocab, media_placeholder_id
+            )
+        
         if hasattr(hf_config, "image_token_id"):
             hf_config.image_token_id = media_placeholder_id
             if hasattr(hf_config, "video_token_id"):
                 hf_config.video_token_id = media_placeholder_id
+        if hasattr(hf_config, "media_placeholder_token_id"):
+            hf_config.media_placeholder_token_id = media_placeholder_id
 
         if image_processor.merge_size != hf_config.vision_config.spatial_merge_size:
             raise ValueError(
