@@ -34,6 +34,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -1164,6 +1165,47 @@ class OpenCUA_VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        # Log token IDs for verification
+        logger = init_logger(__name__)
+        if hasattr(config, "media_placeholder_token_id"):
+            media_placeholder_id = config.media_placeholder_token_id
+            pad_token_id = getattr(config, "pad_token_id", 0)
+            logger.info(
+                "OpenCUA token IDs - media_placeholder_token_id: %d, pad_token_id: %d",
+                media_placeholder_id,
+                pad_token_id,
+            )
+            # Verify with tokenizer if available
+            try:
+                from vllm.multimodal.registry import MULTIMODAL_REGISTRY
+
+                processor = MULTIMODAL_REGISTRY.create_processor(
+                    vllm_config.model_config
+                )
+                tokenizer = processor.info.get_tokenizer()
+                vocab = tokenizer.get_vocab()
+                actual_media_id = vocab.get("<|media_placeholder|>")
+                actual_pad_id = getattr(tokenizer, "pad_token_id", None)
+                if actual_media_id is not None:
+                    match = actual_media_id == media_placeholder_id
+                    logger.info(
+                        "Tokenizer <|media_placeholder|> ID: %d "
+                        "(config: %d, match: %s)",
+                        actual_media_id,
+                        media_placeholder_id,
+                        match,
+                    )
+                if actual_pad_id is not None:
+                    match = actual_pad_id == pad_token_id
+                    logger.info(
+                        "Tokenizer pad_token_id: %d (config: %d, match: %s)",
+                        actual_pad_id,
+                        pad_token_id,
+                        match,
+                    )
+            except Exception as e:
+                logger.warning("Could not verify token IDs with tokenizer: %s", e)
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
 
@@ -1425,16 +1467,13 @@ class OpenCUA_VLForConditionalGeneration(
 
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
+        # OpenCUA uses Kimi-VL style: only <|media_placeholder|> token,
+        # no vision_start/end tokens
         input_tokens_tensor = torch.tensor(input_tokens)
-        vision_start_indices = torch.argwhere(
-            input_tokens_tensor == vision_start_token_id
-        ).squeeze(1)
-        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
-        image_nums = (vision_tokens == image_token_id).sum()
-        video_nums = (vision_tokens == video_token_id).sum()
+        image_nums = (input_tokens_tensor == image_token_id).sum().item()
+        video_nums = (input_tokens_tensor == video_token_id).sum().item()
         llm_pos_ids_list: list = []
 
         st = 0
