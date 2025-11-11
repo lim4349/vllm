@@ -933,9 +933,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        # Remove the extra dimension before merger
-        # hidden_states shape: [seq_len, 1, context_dim] -> [seq_len, context_dim]
-        hidden_states = hidden_states.squeeze(1)
+        # Qwen2.5-VL merger accepts [seq_len, 1, context_dim] directly
         hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
@@ -1141,6 +1139,13 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         # Replace processor's tokenizer with OpenCUA tokenizer
         processor.tokenizer = opencua_tokenizer
+
+        # CRITICAL: Replace ctx.tokenizer with OpenCUA tokenizer
+        # This ensures vLLM uses the correct tokenizer with chat_template
+        # ctx.tokenizer is used by resolve_hf_chat_template and other vLLM functions
+        if hasattr(self.ctx, "tokenizer"):
+            # Store reference to original if needed, but replace with OpenCUA tokenizer
+            self.ctx.tokenizer = opencua_tokenizer
 
         # Get OpenCUA config for token IDs
         hf_config = self.get_hf_config()
