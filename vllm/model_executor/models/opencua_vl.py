@@ -810,12 +810,21 @@ class OpenCUA_VisionTransformer(nn.Module):
         )
         seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
         index_padded = index_padded.reshape(-1)
-        index_new = index_padded[index_padded != -100]
 
-        # cu_seqlens scale: window path uses seqlens.cumsum() * spatial_merge_unit
+        # dtype/device 정합 (중요)
+        device = index_padded.device
+        index_new = index_padded[index_padded != -100].to(
+            dtype=torch.long, device=device
+        )
+        seqlens = seqlens.to(dtype=torch.int32, device=device)
+
+        # cu_seqlens: 윈도우 경로는 seqlens.cumsum() * spatial_merge_unit
         cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
-        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
+        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32, device=device)
         cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        # ⬇️⬇️⬇️ 여기가 핵심 1줄: 선행 0 패딩을 반드시 넣어야 함
+        cu_seqlens_tmp = F.pad(cu_seqlens_tmp, (1, 0), "constant", 0)
 
         return index_new, cu_seqlens_tmp
 
