@@ -950,12 +950,61 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
+        # Validation: Verify leading 0 padding for both window and full paths
+        if cu_window_seqlens[0] != 0 or cu_seqlens[0] != 0:
+            raise ValueError(
+                f"Both cu_window_seqlens and cu_seqlens must start with 0. "
+                f"Got cu_window_seqlens[0]={cu_window_seqlens[0]}, "
+                f"cu_seqlens[0]={cu_seqlens[0]}"
+            )
+
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens
         )
+
+        # Validation: Verify full path length scale
+        # len(hidden_states) must match cu_seqlens last value
+        if cu_seqlens[-1] != seq_len:
+            raise ValueError(
+                f"Full path length mismatch: cu_seqlens[-1]={cu_seqlens[-1]} "
+                f"!= seq_len={seq_len}. This indicates incorrect scaling."
+            )
+
+        # Validation: Verify rope/index alignment
+        # rotary_pos_emb.shape[0] must match hidden_states.shape[0]
+        if rotary_pos_emb.shape[0] != seq_len:
+            raise ValueError(
+                f"RoPE/Index alignment mismatch: rotary_pos_emb.shape[0]="
+                f"{rotary_pos_emb.shape[0]} != seq_len={seq_len}"
+            )
+
+        # Validation: Verify max_seqlen and sequence length consistency
+        if max_seqlen_full == 0 or max_seqlen_window == 0:
+            raise ValueError(
+                f"max_seqlen must be > 0. Got max_seqlen_full={max_seqlen_full}, "
+                f"max_seqlen_window={max_seqlen_window}"
+            )
+
+        # Verify cu[1:]-cu[:-1] sum matches seq_len for both paths
+        cu_seqlens_diff = (cu_seqlens[1:] - cu_seqlens[:-1]).sum().item()
+        cu_window_seqlens_diff = (
+            (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).sum().item()
+        )
+        if cu_seqlens_diff != seq_len:
+            raise ValueError(
+                f"Full path sequence length mismatch: "
+                f"sum(cu_seqlens[1:]-cu_seqlens[:-1])={cu_seqlens_diff} "
+                f"!= seq_len={seq_len}"
+            )
+        if cu_window_seqlens_diff != seq_len:
+            raise ValueError(
+                f"Window path sequence length mismatch: "
+                f"sum(cu_window_seqlens[1:]-cu_window_seqlens[:-1])="
+                f"{cu_window_seqlens_diff} != seq_len={seq_len}"
+            )
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
