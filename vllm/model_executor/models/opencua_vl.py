@@ -773,7 +773,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         llm_grid_w = grid_w // self.spatial_merge_size
         num_tokens = grid_t * llm_grid_h * llm_grid_w
         index = torch.arange(num_tokens)
-        cu_seqlens = torch.tensor([num_tokens], dtype=torch.int32)
+        # For sequential indexing, cu_seqlens should be in merge units
+        # to match the actual sequence length after merge
+        cu_seqlens = torch.tensor(
+            [num_tokens * self.spatial_merge_unit], dtype=torch.int32
+        )
         return index, cu_seqlens
 
     @lru_cache(maxsize=1024)  # noqa: B019
@@ -900,13 +904,9 @@ class OpenCUA_VisionTransformer(nn.Module):
             cu_seqlens = cu_seqlens * self.spatial_merge_unit
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
-        # 시퀀셜 인덱싱 사용 시 cu_window_seqlens도 spatial_merge_unit로 스케일링 필요
-        # window attention 블록에서 올바른 sequence length를 사용하기 위해
-        # cu_window_seqlens가 이미 스케일링되어 있는지 확인
-        # 시퀀셜 인덱싱의 경우 cu_seqlens와 동일한 스케일이어야 함
-        if len(cu_window_seqlens) > 1 and cu_window_seqlens[-1].item() < seq_len:
-            # 스케일링이 안 되어 있으면 스케일링
-            cu_window_seqlens = cu_window_seqlens * self.spatial_merge_unit
+        # 시퀀셜 인덱싱 사용 시 cu_window_seqlens는 이미 merge 단위로 계산됨
+        # get_window_index_1d에서 spatial_merge_unit로 스케일링된 값을 반환
+        # 따라서 추가 스케일링 불필요
 
         # 배치 차원 추가
         hidden_states = hidden_states.unsqueeze(1)  # [seq, 1, dim]
