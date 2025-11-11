@@ -1739,18 +1739,15 @@ class OpenCUA_VLForConditionalGeneration(
         # Logging before calculating delta
         logger.info(
             "OpenCUA MRoPE before delta - llm_positions shape: %s, "
-            "llm_positions.max(): %d, input_tokens len: %d, llm_positions.shape[1]: %d",
+            "llm_positions.max(): %d, input_tokens len: %d",
             str(llm_positions.shape),
             llm_positions.max().item(),
             len(input_tokens),
-            llm_positions.shape[1],
         )
         
-        # mrope_position_delta should be calculated based on the actual sequence length
-        # after visual token replacement, not input_tokens length
-        # Use llm_positions.shape[1] which is the actual sequence length after replacement
-        actual_seq_len = llm_positions.shape[1]
-        mrope_position_delta = (llm_positions.max() + 1 - actual_seq_len).item()
+        # mrope_position_delta calculation matches Qwen2.5-VL
+        # This represents the difference between the maximum position and the input length
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
         
         # Logging
