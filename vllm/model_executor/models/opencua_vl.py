@@ -1690,7 +1690,8 @@ class OpenCUA_VLForConditionalGeneration(
             logger.info(
                 "OpenCUA MRoPE visual - visual_positions shape: %s, "
                 "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
-                "visual_start_pos: %d, t_index max: %d, h_index max: %d, w_index max: %d",
+                "visual_start_pos: %d, t_index max: %d, h_index max: %d, w_index max: %d, "
+                "visual_positions[0] max: %d, visual_positions[1] max: %d, visual_positions[2] max: %d",
                 str(visual_positions.shape),
                 visual_positions.min().item(),
                 visual_positions.max().item(),
@@ -1699,6 +1700,9 @@ class OpenCUA_VLForConditionalGeneration(
                 t_index.max().item(),
                 h_index.max().item(),
                 w_index.max().item(),
+                visual_positions[0].max().item(),
+                visual_positions[1].max().item(),
+                visual_positions[2].max().item(),
             )
             
             llm_pos_ids_list.append(visual_positions)
