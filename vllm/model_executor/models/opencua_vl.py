@@ -607,7 +607,7 @@ class OpenCUA_VisionPatchMerger(nn.Module):
             start += n
 
             # Reshape to [t, h, w, C] then merge m×m blocks using unfold
-            # This ensures correct spatial order for merging
+            # unfold ensures correct spatial order for merging
             assert (
                 h % m == 0 and w % m == 0
             ), f"h={h}, w={w} must be divisible by merge_size={m}"
@@ -616,6 +616,7 @@ class OpenCUA_VisionPatchMerger(nn.Module):
             xi = xi.reshape(t, h, w, C)
             
             # For each temporal frame, apply spatial merge using unfold
+            # This ensures correct spatial order (row-major within each m×m block)
             merged_frames = []
             for frame_idx in range(t):
                 frame_tokens = xi[frame_idx]  # [h, w, C]
