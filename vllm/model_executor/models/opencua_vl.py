@@ -739,24 +739,62 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def get_window_index_1d(self, grid_t, grid_h, grid_w):
-        """Simple sequential indexing for 1D RoPE.
+        """Window indexing for 1D RoPE with spatial locality preserved.
 
-        OpenCUA uses simple sequential indexing without window structure
-        for faster processing and correct Korean output.
-
-        Note: For window attention path, cu_seqlens must be scaled by
-        spatial_merge_unit to match the actual sequence length in patches.
+        Even though we use 1D RoPE, we still need to preserve spatial
+        locality for window attention to work correctly. This is critical
+        for vision transformer to extract spatial information from images.
         """
+        # Window size conversion: (window_size // patch_size) // spatial_merge_size
+        # This order is critical for correct boundary alignment
+        vit_merger_window_size = (
+            self.window_size // self.patch_size
+        ) // self.spatial_merge_size
+
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
-        num_tokens = grid_t * llm_grid_h * llm_grid_w
-        index = torch.arange(num_tokens)
-        # Scale by spatial_merge_unit for window attention path
-        # This matches the actual patch sequence length after merge
-        cu_seqlens = torch.tensor(
-            [num_tokens * self.spatial_merge_unit], dtype=torch.int32
+        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+            grid_t, llm_grid_h, llm_grid_w
         )
-        return index, cu_seqlens
+
+        # Padding: use modular arithmetic for safety (remainder=0 -> pad=0)
+        pad_h = (
+            vit_merger_window_size - (llm_grid_h % vit_merger_window_size)
+        ) % vit_merger_window_size
+        pad_w = (
+            vit_merger_window_size - (llm_grid_w % vit_merger_window_size)
+        ) % vit_merger_window_size
+
+        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
+
+        # Index reshape order: row-major -> window grouping -> window inner row/col
+        # [t, H, W] -> pad -> [t, nH, win, nW, win] ->
+        # permute(0,1,3,2,4) -> [t, nH*nW, win, win]
+        index_padded = index_padded.reshape(
+            grid_t,
+            num_windows_h,
+            vit_merger_window_size,
+            num_windows_w,
+            vit_merger_window_size,
+        )
+        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
+            grid_t,
+            num_windows_h * num_windows_w,
+            vit_merger_window_size,
+            vit_merger_window_size,
+        )
+        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+        index_padded = index_padded.reshape(-1)
+        index_new = index_padded[index_padded != -100]
+
+        # cu_seqlens scale: window path uses seqlens.cumsum() * spatial_merge_unit
+        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
+        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
+        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        return index_new, cu_seqlens_tmp
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
