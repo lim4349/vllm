@@ -803,16 +803,17 @@ class OpenCUA_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
         # rotary_pos_emb_thw shape: [total_llm_tokens, rotary_dim // 2]
-        # Apply window reordering
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :]
-        # rotary_pos_emb_thw shape after indexing: [total_llm_tokens, rotary_dim // 2]
-        # Reshape to match spatial merge unit structure
+        # Reshape to match spatial merge unit structure for window reordering
         # [total_llm_tokens // spatial_merge_unit, spatial_merge_unit, rotary_dim // 2]
         rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
             rotary_pos_emb_thw.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
             -1,
         )
+        # Apply window reordering
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        # Flatten to [total_llm_tokens, rotary_dim // 2] for attention
+        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
