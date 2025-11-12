@@ -573,12 +573,10 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     ) -> torch.Tensor:
         # OpenCUA uses 1D RoPE, so vision transformer output is
         # already in 1D order. Use simple reshape like Qwen2.5-VL.
-        # Input shape: [seq_len, 1, context_dim] or [seq_len, context_dim]
-        # Ensure 2D for LayerNorm: [seq_len, context_dim]
-        if x.dim() == 3:
-            x = x.squeeze(1)  # [seq_len, 1, context_dim] -> [seq_len, context_dim]
-
-        x = self.ln_q(x)  # [seq_len, context_dim] -> [seq_len, context_dim]
+        # Input shape: [seq_len, 1, context_dim]
+        # LayerNorm normalizes over the last dimension,
+        # so it handles 3D tensors correctly
+        x = self.ln_q(x)
 
         # Qwen2.5-VL style: simple view reshape
         # The vision transformer with 1D RoPE outputs patches in
@@ -586,6 +584,10 @@ class OpenCUA_VisionPatchMerger(nn.Module):
         # [num_merged_tokens, hidden_size] where
         # hidden_size = context_dim * spatial_merge_size^2
         # This groups spatial_merge_size^2 patches together
+        # view(-1, hidden_size) works on [seq_len, 1, context_dim]:
+        # total_elements = seq_len * 1 * context_dim
+        # num_merged_tokens = total_elements / hidden_size
+        # = seq_len / spatial_merge_size^2
         x = x.view(-1, self.hidden_size)
 
         out = self.mlp(x)
@@ -705,6 +707,15 @@ class OpenCUA_VisionTransformer(nn.Module):
                 for layer_idx in range(depth)
             ]
         )
+
+        # OpenCUA uses sequential-only processing (1D RoPE)
+        # Force all layers to use full attention (no window attention)
+        # Override any config setting to ensure all blocks use full attention
+        self.fullatt_block_indexes = list(range(depth))
+        # Also update config if it exists
+        if hasattr(vision_config, "fullatt_block_indexes"):
+            vision_config.fullatt_block_indexes = self.fullatt_block_indexes
+
         self.merger = OpenCUA_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
             context_dim=self.hidden_size,
@@ -728,14 +739,15 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
-        # Vision transformer processes all patches after patch_embed
-        # Total patches = t * h * w (not t * llm_grid_h * llm_grid_w)
+        # grid_thw is in patch units (not pixels)
+        # t, h, w represent temporal, height, width in patch space
+        # Total patches after patch_embed = t * h * w
         # For 1D RoPE, we need position embeddings for each patch in sequence order
         total_patches = t * h * w
         rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_patches)
         # rotary_pos_emb_1d shape: [total_patches, rotary_dim // 2]
-        # cu_seqlens_1d should represent the sequence length after patch_embed,
-        # which is t * h * w (total patches across all frames)
+        # cu_seqlens_1d represents sequence length after patch_embed
+        # This is the number of patches before spatial merging
         cu_seqlens_1d = torch.tensor([total_patches], dtype=torch.int32)
         return rotary_pos_emb_1d, cu_seqlens_1d
 
@@ -755,6 +767,8 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
+        # NOTE: This function is not used in OpenCUA (no window reordering)
+        # Kept for compatibility but should never be called
         # building the inverse permutation in O(n) time
         inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
@@ -796,20 +810,40 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
+        # Critical validation: cu_seqlens[-1] must equal seq_len
+        # This ensures the merge/length scale is correct
+        # cu_seqlens is prefix-sum with leading 0, last value == total seq_len
+        if cu_seqlens[-1].item() != seq_len:
+            raise ValueError(
+                f"cu_seqlens[-1] ({cu_seqlens[-1].item()}) != seq_len ({seq_len}). "
+                f"This indicates a merge/length scale mismatch. "
+                f"cu_seqlens: {cu_seqlens.tolist()}, "
+                f"hidden_states shape: {hidden_states.shape}"
+            )
+
         # Logging
         logger.info(
             "OpenCUA VisionTransformer - rotary_pos_emb shape: %s, "
-            "cu_seqlens: %s, hidden_states shape: %s",
+            "cu_seqlens: %s (last=%d), hidden_states shape: %s, seq_len: %d",
             str(rotary_pos_emb.shape),
             str(cu_seqlens),
+            cu_seqlens[-1].item(),
             str(hidden_states.shape),
+            seq_len,
         )
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+
+        # OpenCUA uses sequential-only processing (1D RoPE)
+        # All layers use full attention - no window attention or reordering
+        # No gather/scatter or window indexing is performed
+        # All blocks process in sequential order with the same cu_seqlens
         for layer_num, blk in enumerate(self.blocks):
+            # All layers use full attention (fullatt_block_indexes contains all layers)
+            # No window-based cu_seqlens or reordering needed
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
@@ -1209,6 +1243,17 @@ class OpenCUA_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
+            # Ensure all layers use full attention (sequential-only processing)
+            # Override config and model attributes after initialization
+            depth = len(self.visual.blocks)
+            self.visual.fullatt_block_indexes = list(range(depth))
+            if hasattr(config.vision_config, "fullatt_block_indexes"):
+                config.vision_config.fullatt_block_indexes = list(range(depth))
+            if hasattr(self.visual, "config") and hasattr(
+                self.visual.config, "fullatt_block_indexes"
+            ):
+                self.visual.config.fullatt_block_indexes = list(range(depth))
+
             text_config = getattr(config, "text_config", None)
             if text_config is None:
                 text_config_dict = {
@@ -1316,6 +1361,25 @@ class OpenCUA_VLForConditionalGeneration(
                         config.media_placeholder_token_id,
                         len(vocab),
                     )
+                    # Verify that <|image_pad|>, <|vision_start|>, etc. are NOT in vocab
+                    forbidden_tokens = [
+                        "<|image_pad|>",
+                        "<|vision_start|>",
+                        "<|vision_end|>",
+                    ]
+                    for token in forbidden_tokens:
+                        if token in vocab:
+                            logger.warning(
+                                "Forbidden token '%s' found in vocab (id: %d). "
+                                "OpenCUA should only use <|media_placeholder|>.",
+                                token,
+                                vocab[token],
+                            )
+                        else:
+                            logger.info(
+                                "Forbidden token '%s' correctly absent from vocab",
+                                token,
+                            )
                 except Exception as e:
                     logger.warning("Could not check tokenizer vocab: %s", e)
             except Exception as e:
@@ -1665,9 +1729,24 @@ class OpenCUA_VLForConditionalGeneration(
                 remain_videos -= 1
                 ed = ed_video
 
+            # grid_thw is in patch units (not pixels)
+            # After spatial merging, visual tokens = t * h * w // (spatial_merge_size^2)
             llm_grid_t = t
             llm_grid_h = h // spatial_merge_size
             llm_grid_w = w // spatial_merge_size
+            # Calculate visual token count after spatial merging
+            # This must match the merger output exactly
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            # Verify: num_visual_tokens = t * h * w // (spatial_merge_size^2)
+            expected_tokens = (t * h * w) // (spatial_merge_size * spatial_merge_size)
+            if num_visual_tokens != expected_tokens:
+                raise ValueError(
+                    f"Visual token count mismatch: "
+                    f"num_visual_tokens={num_visual_tokens}, "
+                    f"expected={expected_tokens} "
+                    f"(t={t}, h={h}, w={w}, spatial_merge_size={spatial_merge_size})"
+                )
+
             # text_len includes all text tokens before the placeholder token
             # The placeholder token at position ed will be replaced with visual tokens
             text_len = ed - st
@@ -1676,7 +1755,8 @@ class OpenCUA_VLForConditionalGeneration(
             # Logging
             logger.info(
                 "OpenCUA MRoPE segment - st: %d, ed: %d, text_len: %d, "
-                "grid_thw: [%d, %d, %d], llm_grid: [%d, %d, %d], st_idx: %d",
+                "grid_thw: [%d, %d, %d] (patch units), "
+                "llm_grid: [%d, %d, %d], num_visual_tokens: %d, st_idx: %d",
                 st,
                 ed,
                 text_len,
@@ -1686,6 +1766,7 @@ class OpenCUA_VLForConditionalGeneration(
                 llm_grid_t,
                 llm_grid_h,
                 llm_grid_w,
+                num_visual_tokens,
                 st_idx,
             )
             if text_len > 0:
@@ -1696,7 +1777,7 @@ class OpenCUA_VLForConditionalGeneration(
 
             # OpenCUA uses 1D RoPE for vision transformer, but language model
             # MRoPE still expects 3D positions. Generate proper 3D positions
-            # for visual tokens (t, h, w dimensions)
+            # for visual tokens (t, h, w dimensions) in sequential order
             t_index = (
                 torch.arange(llm_grid_t)
                 .view(-1, 1)
@@ -1718,7 +1799,6 @@ class OpenCUA_VLForConditionalGeneration(
             # visual_positions start after text_len tokens
             # This matches Qwen2.5-VL logic:
             # visual_positions = positions + text_len + st_idx
-            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
             # Calculate the starting position for visual tokens
             # After text positions, visual tokens start at text_len + st_idx
