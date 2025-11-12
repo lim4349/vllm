@@ -743,7 +743,7 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     def rotary_pos_emb_thw(self, t, h, w):
         # For window attention, we need 2D position embeddings
-        # Similar to Qwen2.5-VL but using 1D RoPE for OpenCUA
+        # Similar to Qwen2.5-VL: use 2D position IDs for window attention
         hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
         wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
         hpos_ids = (
@@ -766,13 +766,21 @@ class OpenCUA_VisionTransformer(nn.Module):
             .permute(0, 2, 1, 3)
             .flatten()
         )
-        # For 1D RoPE, we use sequential positions
-        # But we still need to handle window reordering
+        # Use 2D position IDs like Qwen2.5-VL
+        # Stack h and w position IDs and repeat for temporal dimension
+        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
         max_size = max(h, w)
-        rotary_pos_emb_full = self.rotary_pos_emb_1d(max_size * max_size)
-        # Flatten and reshape for window attention
-        rotary_pos_emb = rotary_pos_emb_full[: t * h * w].reshape(
-            t * h * w // self.spatial_merge_unit,
+        # rotary_pos_emb returns [max_size, rotary_dim // 2]
+        # We use 2D indexing: rotary_pos_emb[pos_ids] where pos_ids is [t*h*w, 2]
+        rotary_pos_emb_full = self.rotary_pos_emb(max_size)
+        # Index using 2D position IDs: pos_ids[:, 0] for h, pos_ids[:, 1] for w
+        # For 1D RoPE, we use max(h, w) as the sequence length
+        # But we need to map 2D positions to 1D positions
+        # Use hpos_ids * max_size + wpos_ids for 1D mapping
+        pos_ids_1d = pos_ids[:, 0] * max_size + pos_ids[:, 1]
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
+        rotary_pos_emb = rotary_pos_emb.reshape(
+            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
             -1,
         )
