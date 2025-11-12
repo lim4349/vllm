@@ -2288,9 +2288,15 @@ class OpenCUA_VLForConditionalGeneration(
         # This allows vLLM to use positions[0] (or any row) as the actual position_ids
         llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
 
-        # For compatibility with vLLM interface, return delta = 0
-        # (positions are already correct, no adjustment needed)
-        mrope_position_delta = 0
+        # Calculate mrope_position_delta similar to Qwen2VL:
+        # delta = (max_position + 1) - len(input_tokens)
+        # This represents the difference between the position encoding range
+        # and the actual input token count (due to placeholder expansion)
+        # For OpenCUA, this should be: (max_position + 1) - len(input_tokens)
+        # where max_position is the maximum position ID used
+        mrope_position_delta = (
+            llm_positions_1d.max().item() + 1 - len(input_tokens)
+        )
 
         # Logging
         logger.info(
