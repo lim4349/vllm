@@ -1065,6 +1065,13 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
 
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache processors to avoid reloading on every call
+        self._cached_processor: OpenCUA_VLProcessor | None = None
+        self._cached_image_processor = None
+        self._cached_video_processor = None
+
     def get_hf_config(self):
         config = self.ctx.get_hf_config(OpenCUA_VLConfig)
         text_config = config.get_text_config()
@@ -1105,6 +1112,10 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         OpenCUA uses TikTokenV3 tokenizer, so we need to explicitly pass
         the tokenizer to avoid loading issues with Qwen2Tokenizer.
         """
+        # Return cached processor if available
+        if self._cached_processor is not None:
+            return self._cached_processor
+
         # Use init_processor to explicitly pass tokenizer to avoid
         # tokenizer loading issues (OpenCUA uses TikTokenV3, not Qwen2Tokenizer)
         tokenizer = self.get_tokenizer()
@@ -1118,14 +1129,21 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
+            
+            # Load processors only if not cached
+            if self._cached_image_processor is None:
+                # Force use_fast=False to ensure consistent preprocessing
+                # OpenCUA requires slow processor to match original behavior
+                self._cached_image_processor = AutoImageProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            if self._cached_video_processor is None:
+                self._cached_video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            
+            image_processor = self._cached_image_processor
+            video_processor = self._cached_video_processor
 
             # Log processor details
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
@@ -1157,27 +1175,37 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
-            return self.ctx.init_processor(
+            processor = self.ctx.init_processor(
                 OpenCUA_VLProcessor,
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
                 **kwargs,
             )
+            # Cache the processor for future use
+            self._cached_processor = processor
+            return processor
         except Exception:
             # Fallback: create processor directly without going through
             # cached_processor_from_config to avoid tokenizer key issues
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
+            
+            # Load processors only if not cached
+            if self._cached_image_processor is None:
+                # Force use_fast=False to ensure consistent preprocessing
+                # OpenCUA requires slow processor to match original behavior
+                self._cached_image_processor = AutoImageProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            if self._cached_video_processor is None:
+                self._cached_video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+            
+            image_processor = self._cached_image_processor
+            video_processor = self._cached_video_processor
 
             # Log processor details
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
@@ -1210,12 +1238,15 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
-            return OpenCUA_VLProcessor(
+            processor = OpenCUA_VLProcessor(
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
                 **kwargs,
             )
+            # Cache the processor for future use
+            self._cached_processor = processor
+            return processor
 
 
 class OpenCUA_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
