@@ -1899,34 +1899,37 @@ class OpenCUA_VLForConditionalGeneration(
             # but if they're already embedded as placeholders, we skip over them
             st_after = vision_token_end
 
-            # Calculate replacement count: ed - st_before should be 1 (the placeholder)
-            # After replacement, st should advance by num_visual_tokens
-            replacement_count = ed - st_before
-            st_advance = st_after - ed
+            # Calculate text length and placeholder count
+            # text_len = ed - st_before is the number of text tokens before placeholder
+            # placeholder_count = 1 (there's exactly 1 placeholder at position ed)
+            text_len_before_placeholder = ed - st_before
+            placeholder_count = 1  # Each image/video has exactly 1 placeholder in text
+            st_advance = st_after - ed  # How many tokens st advances past placeholder
 
             logger.info(
                 "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
                 "st before: %d, st after: %d, "
-                "replacement_count (ed - st_before): %d "
-                "(should be 1 for single placeholder), "
+                "text_len_before_placeholder: %d, "
+                "placeholder_count: %d (should be 1), "
                 "st_advance (st_after - ed): %d "
                 "(should equal num_visual_tokens: %d)",
                 ed,
                 num_visual_tokens,
                 st_before,
                 st_after,
-                replacement_count,
+                text_len_before_placeholder,
+                placeholder_count,
                 st_advance,
                 num_visual_tokens,
             )
 
             # Validation: For single image case, verify st update logic
             if image_nums == 1 and video_nums == 0:
-                if replacement_count != 1:
+                if placeholder_count != 1:
                     logger.warning(
-                        "Single image case: replacement_count = %d "
+                        "Single image case: placeholder_count = %d "
                         "(expected 1 for single placeholder)",
-                        replacement_count,
+                        placeholder_count,
                     )
                 if st_advance != num_visual_tokens:
                     raise ValueError(
@@ -1936,9 +1939,11 @@ class OpenCUA_VLForConditionalGeneration(
                         f"st update logic."
                     )
                 logger.info(
-                    "Single image case validation - replacement_count: %d, "
-                    "st_advance: %d, num_visual_tokens: %d, match: %s",
-                    replacement_count,
+                    "Single image case validation - text_len_before_placeholder: %d, "
+                    "placeholder_count: %d, st_advance: %d, num_visual_tokens: %d, "
+                    "st_advance_match: %s",
+                    text_len_before_placeholder,
+                    placeholder_count,
                     st_advance,
                     num_visual_tokens,
                     st_advance == num_visual_tokens,
