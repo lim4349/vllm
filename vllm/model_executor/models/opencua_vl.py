@@ -50,7 +50,12 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -1408,21 +1413,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             # Return PromptUpdateDetails with:
             # - full: 1 placeholder token (for prompt text)
             # - is_embed: mask indicating all num_tokens positions should get embeddings
-            from vllm.multimodal.processing import PromptUpdateDetails
 
             # The prompt text should contain only 1 placeholder
             single_placeholder = [placeholder[modality]]
 
             # Create is_embed function that marks all num_tokens positions
             # This ensures PlaceholderRange.length = num_tokens for is_multimodal mask
-            def is_embed(tokenizer: AnyTokenizer, full: PromptSeq) -> torch.Tensor:
+            def is_embed(
+                tokenizer: AnyTokenizer, full: list[int] | str
+            ) -> torch.Tensor:
                 # full should be the single placeholder token
                 # We need to return a mask of length num_tokens
                 # indicating all positions should get embeddings
-                token_ids = _seq2tokens(tokenizer, full)
-                # Create mask: all positions in the single placeholder should be True
-                # But we need num_tokens positions, so we expand the mask
-                placeholder_mask = torch.tensor(token_ids) == placeholder[modality]
                 # Expand to num_tokens length
                 # Since we only have 1 placeholder in text, we create a mask
                 # that marks it as the start of num_tokens embedding positions
