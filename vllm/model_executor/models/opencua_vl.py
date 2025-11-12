@@ -1130,13 +1130,30 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # Log processor details
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
             logger = init_logger(__name__)
+            # Log additional image processor parameters for text recognition debugging
+            size_info = getattr(image_processor, "size", "N/A")
+            max_pixels = getattr(image_processor, "max_pixels", "N/A")
+            min_pixels = getattr(image_processor, "min_pixels", "N/A")
             logger.info(
                 "OpenCUA image processor loaded - type: %s, use_fast: %s, "
-                "merge_size: %s",
+                "merge_size: %s, size: %s, max_pixels: %s, min_pixels: %s",
                 type(image_processor).__name__,
                 getattr(image_processor, "use_fast", "N/A"),
                 getattr(image_processor, "merge_size", "N/A"),
+                size_info,
+                max_pixels,
+                min_pixels,
             )
+            # Log warning if image size might be too small for text recognition
+            if isinstance(size_info, dict):
+                max_size = max(size_info.values()) if size_info else 0
+                if max_size < 1024:
+                    logger.warning(
+                        "Image processor size (%s) may be too small for optimal "
+                        "text recognition. Consider using higher resolution images "
+                        "or adjusting image processor settings.",
+                        size_info,
+                    )
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
@@ -1165,13 +1182,31 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             # Log processor details
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
             logger = init_logger(__name__)
+            # Log additional image processor parameters for text recognition debugging
+            size_info = getattr(image_processor, "size", "N/A")
+            max_pixels = getattr(image_processor, "max_pixels", "N/A")
+            min_pixels = getattr(image_processor, "min_pixels", "N/A")
             logger.info(
                 "OpenCUA image processor loaded (fallback) - type: %s, "
-                "use_fast: %s, merge_size: %s",
+                "use_fast: %s, merge_size: %s, size: %s, "
+                "max_pixels: %s, min_pixels: %s",
                 type(image_processor).__name__,
                 getattr(image_processor, "use_fast", "N/A"),
                 getattr(image_processor, "merge_size", "N/A"),
+                size_info,
+                max_pixels,
+                min_pixels,
             )
+            # Log warning if image size might be too small for text recognition
+            if isinstance(size_info, dict):
+                max_size = max(size_info.values()) if size_info else 0
+                if max_size < 1024:
+                    logger.warning(
+                        "Image processor size (%s) may be too small for optimal "
+                        "text recognition. Consider using higher resolution images "
+                        "or adjusting image processor settings.",
+                        size_info,
+                    )
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
