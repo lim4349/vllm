@@ -1704,18 +1704,10 @@ class OpenCUA_VLForConditionalGeneration(
         image_index, video_index = 0, 0
         for _ in range(image_nums + video_nums):
             # Find the next placeholder token in the text portion
-            # If there are consecutive placeholder tokens, they are vision tokens.
-            # We need to find the first placeholder in each consecutive sequence.
+            # With the fix, there should be exactly 1 placeholder per image/video
             if remain_images > 0:
                 try:
-                    # Find the first occurrence of placeholder from st
                     ed_image = input_tokens.index(image_token_id, st)
-                    # If this placeholder is part of a consecutive sequence,
-                    # find the first one in the sequence (the text placeholder)
-                    while (
-                        ed_image > st and input_tokens[ed_image - 1] == image_token_id
-                    ):
-                        ed_image -= 1
                 except ValueError:
                     ed_image = len(input_tokens) + 1
             else:
@@ -1723,11 +1715,6 @@ class OpenCUA_VLForConditionalGeneration(
             if remain_videos > 0:
                 try:
                     ed_video = input_tokens.index(video_token_id, st)
-                    # Find the first placeholder in consecutive sequence
-                    while (
-                        ed_video > st and input_tokens[ed_video - 1] == video_token_id
-                    ):
-                        ed_video -= 1
                 except ValueError:
                     ed_video = len(input_tokens) + 1
             else:
@@ -1846,25 +1833,17 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
             # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # However, if vision tokens are already embedded as placeholders in
-            # input_tokens, we need to skip over them.
-
-            # Find the end of consecutive placeholder tokens (vision tokens)
-            # after the text placeholder at position ed
-            vision_token_end = ed + 1
-            while (
-                vision_token_end < len(input_tokens)
-                and input_tokens[vision_token_end] == image_token_id
-            ):
-                vision_token_end += 1
+            # Since we now keep only 1 placeholder in template, we advance st by
+            # ed + num_visual_tokens (the placeholder at ed is replaced with
+            # num_visual_tokens vision embeddings)
 
             # Logging: st update validation
             # For single image case, verify st update matches replacement count
             st_before = st
-            # st should advance past the text placeholder and any vision token
-            # placeholders. The actual number of vision tokens is num_visual_tokens,
-            # but if they're already embedded as placeholders, we skip over them
-            st_after = vision_token_end
+            # st should advance past the placeholder (at ed) and the visual tokens
+            # The placeholder at position ed is replaced with num_visual_tokens
+            # vision embeddings, so st = ed + num_visual_tokens
+            st_after = ed + num_visual_tokens
 
             # Calculate text length and placeholder count
             # text_len = ed - st_before is the number of text tokens before placeholder
