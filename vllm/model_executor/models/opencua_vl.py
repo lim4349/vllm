@@ -1679,6 +1679,34 @@ class OpenCUA_VLForConditionalGeneration(
         # Use image_grid_thw and video_grid_thw lengths to get actual counts
         image_nums = len(image_grid_thw) if image_grid_thw else 0
         video_nums = len(video_grid_thw) if video_grid_thw else 0
+
+        # Count actual placeholder tokens in input_tokens
+        # This should match the number of images + videos (after replacement count)
+        placeholder_count_in_input = input_tokens.count(image_token_id)
+        expected_placeholder_count = image_nums + video_nums
+
+        # Logging: placeholder count validation
+        logger.info(
+            "OpenCUA MRoPE placeholder count - input_tokens placeholder count: %d, "
+            "expected (image_nums + video_nums): %d (images: %d, videos: %d), "
+            "match: %s",
+            placeholder_count_in_input,
+            expected_placeholder_count,
+            image_nums,
+            video_nums,
+            placeholder_count_in_input == expected_placeholder_count,
+        )
+
+        if placeholder_count_in_input != expected_placeholder_count:
+            raise ValueError(
+                f"Placeholder count mismatch: input_tokens has "
+                f"{placeholder_count_in_input} <|media_placeholder|> tokens, "
+                f"but expected {expected_placeholder_count} "
+                f"(image_nums={image_nums}, video_nums={video_nums}). "
+                f"This indicates a mismatch between tokenization and "
+                f"multimodal input."
+            )
+
         llm_pos_ids_list: list = []
 
         st = 0
@@ -1832,17 +1860,57 @@ class OpenCUA_VLForConditionalGeneration(
             # num_visual_tokens tokens. The next text starts after these visual tokens.
             # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
 
-            # Logging
+            # Logging: st update validation
+            # For single image case, verify st update matches replacement count
+            st_before = st
+            st_after = ed + num_visual_tokens
+
+            # Calculate replacement count: ed - st_before should be 1 (the placeholder)
+            # After replacement, st should advance by num_visual_tokens
+            replacement_count = ed - st_before
+            st_advance = st_after - ed
+
             logger.info(
                 "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
-                "st before: %d, st after: %d",
+                "st before: %d, st after: %d, "
+                "replacement_count (ed - st_before): %d "
+                "(should be 1 for single placeholder), "
+                "st_advance (st_after - ed): %d "
+                "(should equal num_visual_tokens: %d)",
                 ed,
                 num_visual_tokens,
-                st,
-                ed + num_visual_tokens,
+                st_before,
+                st_after,
+                replacement_count,
+                st_advance,
+                num_visual_tokens,
             )
 
-            st = ed + num_visual_tokens
+            # Validation: For single image case, verify st update logic
+            if image_nums == 1 and video_nums == 0:
+                if replacement_count != 1:
+                    logger.warning(
+                        "Single image case: replacement_count = %d "
+                        "(expected 1 for single placeholder)",
+                        replacement_count,
+                    )
+                if st_advance != num_visual_tokens:
+                    raise ValueError(
+                        f"Single image case: st update mismatch. "
+                        f"st_advance = {st_advance}, but num_visual_tokens = "
+                        f"{num_visual_tokens}. This indicates incorrect "
+                        f"st update logic."
+                    )
+                logger.info(
+                    "Single image case validation - replacement_count: %d, "
+                    "st_advance: %d, num_visual_tokens: %d, match: %s",
+                    replacement_count,
+                    st_advance,
+                    num_visual_tokens,
+                    st_advance == num_visual_tokens,
+                )
+
+            st = st_after
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
