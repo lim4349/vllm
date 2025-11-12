@@ -1968,9 +1968,15 @@ class OpenCUA_VLForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
+        # OpenCUA uses 1D RoPE, not 3D MRoPE
+        # vLLM interface requires (3, L) shape for MRoPE compatibility,
+        # but RotaryEmbedding.flatten() will incorrectly process (3, L) positions
+        # Solution: Extract positions[0] as 1D position_ids before passing to model
+        positions_1d = positions[0] if positions.ndim == 2 else positions
+
         hidden_states = self.language_model.model(
             input_ids=input_ids,
-            positions=positions,
+            positions=positions_1d,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
