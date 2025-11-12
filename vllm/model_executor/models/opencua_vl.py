@@ -2179,24 +2179,25 @@ class OpenCUA_VLForConditionalGeneration(
 
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens. The next text starts after the placeholder.
-            # st is an index into input_tokens, so we advance by 1 (past the
-            # placeholder). The visual tokens are handled separately in position
-            # encoding
+            # num_visual_tokens tokens. The next text starts after these visual tokens.
+            # Match Qwen2VL's behavior: st = ed + num_visual_tokens
+            # This represents the position in the expanded sequence (after placeholder
+            # expansion), not the actual input_tokens index
 
             # Logging: st update validation
             # For single image case, verify st update matches replacement count
             st_before = st
-            # st is an index into input_tokens, so we advance past the placeholder
-            # The placeholder at position ed is a single token, so st = ed + 1
-            st_after = ed + 1
+            # Match Qwen2VL: st advances by num_visual_tokens (the expanded size)
+            # This is the position in the expanded sequence, not input_tokens index
+            st_after = ed + num_visual_tokens
 
             # Calculate text length and placeholder count
             # text_len = ed - st_before is the number of text tokens before placeholder
             # placeholder_count = 1 (there's exactly 1 placeholder at position ed)
             text_len_before_placeholder = ed - st_before
             placeholder_count = 1  # Each image/video has exactly 1 placeholder in text
-            # How many tokens st advances past placeholder (should be 1)
+            # How many tokens st advances past placeholder
+            # (should equal num_visual_tokens)
             st_advance = st_after - ed
 
             logger.info(
@@ -2204,7 +2205,8 @@ class OpenCUA_VLForConditionalGeneration(
                 "st before: %d, st after: %d, "
                 "text_len_before_placeholder: %d, "
                 "placeholder_count: %d (should be 1), "
-                "st_advance (st_after - ed): %d (should be 1)",
+                "st_advance (st_after - ed): %d "
+                "(should equal num_visual_tokens: %d)",
                 ed,
                 num_visual_tokens,
                 st_before,
@@ -2212,6 +2214,7 @@ class OpenCUA_VLForConditionalGeneration(
                 text_len_before_placeholder,
                 placeholder_count,
                 st_advance,
+                num_visual_tokens,
             )
 
             # Validation: For single image case, verify st update logic
@@ -2222,20 +2225,22 @@ class OpenCUA_VLForConditionalGeneration(
                         "(expected 1 for single placeholder)",
                         placeholder_count,
                     )
-                if st_advance != 1:
+                if st_advance != num_visual_tokens:
                     raise ValueError(
                         f"Single image case: st update mismatch. "
-                        f"st_advance = {st_advance}, but should be 1 "
-                        f"(st is an index into input_tokens, placeholder is 1 token)."
+                        f"st_advance = {st_advance}, but num_visual_tokens = "
+                        f"{num_visual_tokens}. This indicates incorrect "
+                        f"st update logic."
                     )
                 logger.info(
                     "Single image case validation - text_len_before_placeholder: %d, "
-                    "placeholder_count: %d, st_advance: %d (should be 1), "
-                    "num_visual_tokens: %d",
+                    "placeholder_count: %d, st_advance: %d, num_visual_tokens: %d, "
+                    "st_advance_match: %s",
                     text_len_before_placeholder,
                     placeholder_count,
                     st_advance,
                     num_visual_tokens,
+                    st_advance == num_visual_tokens,
                 )
 
             st = st_after
