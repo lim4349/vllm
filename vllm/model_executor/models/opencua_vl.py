@@ -768,16 +768,17 @@ class OpenCUA_VisionTransformer(nn.Module):
             .flatten()
         )
         pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
+        max_size = max(h, w)
         # For 1D RoPE: map 2D positions to 1D sequential positions
-        # Use row-major order: hpos * w + wpos
-        # This is more efficient than hpos * max_size + wpos
-        # and matches the actual grid dimensions
-        llm_h = h // self.spatial_merge_size
-        llm_w = w // self.spatial_merge_size
-        # Total LLM tokens after spatial merge
-        total_llm_tokens = llm_h * llm_w
-        rotary_pos_emb_full = self.rotary_pos_emb_1d(total_llm_tokens)
-        pos_ids_1d = pos_ids[:, 0] * llm_w + pos_ids[:, 1]
+        # hpos_ids and wpos_ids values are in [0, h-1] and [0, w-1] range
+        # Use max_size * max_size to cover all possible 2D positions
+        # Calculate required size and ensure cache is large enough
+        required_size = max_size * max_size
+        # Also account for the maximum possible pos_ids_1d value
+        max_pos_1d = (h - 1) * max_size + (w - 1)
+        required_size = max(required_size, max_pos_1d + 1)
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
+        pos_ids_1d = pos_ids[:, 0] * max_size + pos_ids[:, 1]
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
