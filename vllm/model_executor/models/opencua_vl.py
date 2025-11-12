@@ -1065,6 +1065,13 @@ class OpenCUA_VLProcessor(Qwen2_5_VLProcessor):
 
 
 class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache processors to avoid reloading on every call
+        self._cached_processor: OpenCUA_VLProcessor | None = None
+        self._cached_image_processor = None
+        self._cached_video_processor = None
+
     def get_hf_config(self):
         config = self.ctx.get_hf_config(OpenCUA_VLConfig)
         text_config = config.get_text_config()
@@ -1104,7 +1111,14 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         OpenCUA uses TikTokenV3 tokenizer, so we need to explicitly pass
         the tokenizer to avoid loading issues with Qwen2Tokenizer.
+
+        Processors are cached to avoid reloading on every call.
         """
+        # Return cached processor if available and no kwargs
+        # (kwargs may change behavior, so don't cache when kwargs are provided)
+        if not kwargs and self._cached_processor is not None:
+            return self._cached_processor
+
         # Use init_processor to explicitly pass tokenizer to avoid
         # tokenizer loading issues (OpenCUA uses TikTokenV3, not Qwen2Tokenizer)
         tokenizer = self.get_tokenizer()
@@ -1118,104 +1132,134 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
 
-            # Log processor details
+            # Load image/video processors (cache them if not already cached)
+            is_first_load = self._cached_image_processor is None
+            if is_first_load:
+                # Force use_fast=False to ensure consistent preprocessing
+                # OpenCUA requires slow processor to match original behavior
+                self._cached_image_processor = AutoImageProcessor.from_pretrained(
+                    model_path, **image_processor_config
+                )
+                self._cached_video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path, **image_processor_config
+                )
+
+            image_processor = self._cached_image_processor
+            video_processor = self._cached_video_processor
+
+            # Log processor details only on first load (when cache is populated)
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
-            logger = init_logger(__name__)
-            # Log additional image processor parameters for text recognition debugging
-            size_info = getattr(image_processor, "size", "N/A")
-            max_pixels = getattr(image_processor, "max_pixels", "N/A")
-            min_pixels = getattr(image_processor, "min_pixels", "N/A")
-            logger.info(
-                "OpenCUA image processor loaded - type: %s, use_fast: %s, "
-                "merge_size: %s, size: %s, max_pixels: %s, min_pixels: %s",
-                type(image_processor).__name__,
-                getattr(image_processor, "use_fast", "N/A"),
-                getattr(image_processor, "merge_size", "N/A"),
-                size_info,
-                max_pixels,
-                min_pixels,
-            )
-            # Log warning if image size might be too small for text recognition
-            if isinstance(size_info, dict):
-                max_size = max(size_info.values()) if size_info else 0
-                if max_size < 1024:
-                    logger.warning(
-                        "Image processor size (%s) may be too small for optimal "
-                        "text recognition. Consider using higher resolution images "
-                        "or adjusting image processor settings.",
-                        size_info,
-                    )
+            if is_first_load:
+                logger = init_logger(__name__)
+                # Log additional image processor parameters for text recognition
+                # debugging
+                size_info = getattr(image_processor, "size", "N/A")
+                max_pixels = getattr(image_processor, "max_pixels", "N/A")
+                min_pixels = getattr(image_processor, "min_pixels", "N/A")
+                logger.info(
+                    "OpenCUA image processor loaded - type: %s, use_fast: %s, "
+                    "merge_size: %s, size: %s, max_pixels: %s, min_pixels: %s",
+                    type(image_processor).__name__,
+                    getattr(image_processor, "use_fast", "N/A"),
+                    getattr(image_processor, "merge_size", "N/A"),
+                    size_info,
+                    max_pixels,
+                    min_pixels,
+                )
+                # Log warning if image size might be too small for text recognition
+                if isinstance(size_info, dict):
+                    max_size = max(size_info.values()) if size_info else 0
+                    if max_size < 1024:
+                        logger.warning(
+                            "Image processor size (%s) may be too small for optimal "
+                            "text recognition. Consider using higher resolution images "
+                            "or adjusting image processor settings.",
+                            size_info,
+                        )
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
-            return self.ctx.init_processor(
+            processor = self.ctx.init_processor(
                 OpenCUA_VLProcessor,
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
                 **kwargs,
             )
+
+            # Cache processor if no kwargs (kwargs may change behavior)
+            if not kwargs:
+                self._cached_processor = processor
+
+            return processor
         except Exception:
             # Fallback: create processor directly without going through
             # cached_processor_from_config to avoid tokenizer key issues
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            # Force use_fast=False to ensure consistent preprocessing
-            # OpenCUA requires slow processor to match original behavior
-            image_processor = AutoImageProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
-            video_processor = AutoVideoProcessor.from_pretrained(
-                model_path, use_fast=False, **image_processor_config
-            )
 
-            # Log processor details
+            # Load image/video processors (cache them if not already cached)
+            is_first_load = self._cached_image_processor is None
+            if is_first_load:
+                # Force use_fast=False to ensure consistent preprocessing
+                # OpenCUA requires slow processor to match original behavior
+                self._cached_image_processor = AutoImageProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+                self._cached_video_processor = AutoVideoProcessor.from_pretrained(
+                    model_path, use_fast=False, **image_processor_config
+                )
+
+            image_processor = self._cached_image_processor
+            video_processor = self._cached_video_processor
+
+            # Log processor details only on first load (when cache is populated)
             # Note: Qwen2.5-VL also uses Qwen2VLImageProcessor, which is normal
-            logger = init_logger(__name__)
-            # Log additional image processor parameters for text recognition debugging
-            size_info = getattr(image_processor, "size", "N/A")
-            max_pixels = getattr(image_processor, "max_pixels", "N/A")
-            min_pixels = getattr(image_processor, "min_pixels", "N/A")
-            logger.info(
-                "OpenCUA image processor loaded (fallback) - type: %s, "
-                "use_fast: %s, merge_size: %s, size: %s, "
-                "max_pixels: %s, min_pixels: %s",
-                type(image_processor).__name__,
-                getattr(image_processor, "use_fast", "N/A"),
-                getattr(image_processor, "merge_size", "N/A"),
-                size_info,
-                max_pixels,
-                min_pixels,
-            )
-            # Log warning if image size might be too small for text recognition
-            if isinstance(size_info, dict):
-                max_size = max(size_info.values()) if size_info else 0
-                if max_size < 1024:
-                    logger.warning(
-                        "Image processor size (%s) may be too small for optimal "
-                        "text recognition. Consider using higher resolution images "
-                        "or adjusting image processor settings.",
-                        size_info,
-                    )
+            if is_first_load:
+                logger = init_logger(__name__)
+                # Log additional image processor parameters for text recognition
+                # debugging
+                size_info = getattr(image_processor, "size", "N/A")
+                max_pixels = getattr(image_processor, "max_pixels", "N/A")
+                min_pixels = getattr(image_processor, "min_pixels", "N/A")
+                logger.info(
+                    "OpenCUA image processor loaded (fallback) - type: %s, "
+                    "use_fast: %s, merge_size: %s, size: %s, "
+                    "max_pixels: %s, min_pixels: %s",
+                    type(image_processor).__name__,
+                    getattr(image_processor, "use_fast", "N/A"),
+                    getattr(image_processor, "merge_size", "N/A"),
+                    size_info,
+                    max_pixels,
+                    min_pixels,
+                )
+                # Log warning if image size might be too small for text recognition
+                if isinstance(size_info, dict):
+                    max_size = max(size_info.values()) if size_info else 0
+                    if max_size < 1024:
+                        logger.warning(
+                            "Image processor size (%s) may be too small for optimal "
+                            "text recognition. Consider using higher resolution images "
+                            "or adjusting image processor settings.",
+                            size_info,
+                        )
 
             # OpenCUA uses its own chat template from tokenizer
             # Don't override it, let the processor use the tokenizer's default
-            return OpenCUA_VLProcessor(
+            processor = OpenCUA_VLProcessor(
                 image_processor=image_processor,
                 video_processor=video_processor,
                 tokenizer=tokenizer,
                 **kwargs,
             )
+
+            # Cache processor if no kwargs (kwargs may change behavior)
+            if not kwargs:
+                self._cached_processor = processor
+
+            return processor
 
 
 class OpenCUA_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
