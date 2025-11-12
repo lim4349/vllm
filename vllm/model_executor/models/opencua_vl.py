@@ -810,8 +810,13 @@ class OpenCUA_VisionTransformer(nn.Module):
             self.spatial_merge_unit,
             -1,
         )
+        # window_index_thw is in range [0, total_llm_tokens - 1]
+        # but rotary_pos_emb_thw first dimension is
+        # total_llm_tokens // spatial_merge_unit
+        # So we need to divide window_index_thw by spatial_merge_unit
+        window_index_thw_reshaped = window_index_thw // self.spatial_merge_unit
         # Apply window reordering
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw_reshaped, :, :]
         # Flatten to [total_llm_tokens, rotary_dim // 2] for attention
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
