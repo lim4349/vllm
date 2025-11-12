@@ -2151,19 +2151,28 @@ class OpenCUA_VLForConditionalGeneration(
             )
             if text_len > 0:
                 # OpenCUA uses 1D sequential position_ids for LLM
-                # (not 3D MRoPE coordinates)
-                text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
+                # For MRoPE interface compatibility, convert to 3D format
+                # by repeating the same value for all 3 dimensions
+                text_positions_1d = torch.arange(text_len, dtype=torch.long) + st_idx
+                # Convert to 3D format: repeat the same 1D position for all 3 dims
+                # Shape: (3, text_len)
+                text_positions = text_positions_1d.unsqueeze(0).expand(3, -1)
                 llm_pos_ids_list.append(text_positions)
 
             # OpenCUA uses 1D RoPE for both vision transformer and language model
-            # Generate 1D sequential positions for visual tokens
-            # Visual tokens start after text_len tokens
+            # However, for MRoPE interface compatibility, we need to provide
+            # positions in the same format as Qwen2VL (3D coordinates)
+            # Generate 1D sequential positions for visual tokens, then convert
+            # to 3D format by repeating the same value for all 3 dimensions
             visual_start_pos = text_len + st_idx
-            # Sequential positions for visual tokens:
-            # [start, start+1, ..., start+num_visual_tokens-1]
-            visual_positions = (
+            # For MRoPE compatibility, create 3D positions where all dimensions
+            # have the same sequential value (since OpenCUA uses 1D RoPE)
+            visual_positions_1d = (
                 torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
+            # Convert to 3D format: repeat the same 1D position for all 3 dims
+            # Shape: (3, num_visual_tokens)
+            visual_positions = visual_positions_1d.unsqueeze(0).expand(3, -1)
 
             # Logging
             logger.info(
@@ -2264,42 +2273,35 @@ class OpenCUA_VLForConditionalGeneration(
 
             llm_pos_ids_list.append(text_positions)
 
-        # Concatenate all 1D position_ids
-        llm_positions_1d = torch.cat(llm_pos_ids_list, dim=0)
+        # Concatenate all 3D position_ids (each is shape (3, L))
+        # Concatenate along dimension 1 (sequence length)
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1)
 
         # Logging before slicing
         logger.info(
-            "OpenCUA MRoPE before slice - llm_positions_1d shape: %s, "
-            "llm_positions_1d.max(): %d, input_tokens len: %d",
-            str(llm_positions_1d.shape),
-            llm_positions_1d.max().item(),
+            "OpenCUA MRoPE before slice - llm_positions shape: %s, "
+            "llm_positions.max(): %d, input_tokens len: %d",
+            str(llm_positions.shape),
+            llm_positions.max().item(),
             len(input_tokens),
         )
 
-        # For OpenCUA, we use 1D sequential positions (not 3D MRoPE coordinates)
-        # The positions are already correctly calculated, so delta should be 0
-        # This is different from Qwen2VL which uses 3D MRoPE coordinates
-        mrope_position_delta = 0
+        # Calculate mrope_position_delta similar to Qwen2VL
+        mrope_position_delta = (
+            llm_positions.max().item() + 1 - len(input_tokens)
+        )
 
-        # OpenCUA uses 1D sequential position_ids
         # Slice according to context_len and seq_len if provided
         if seq_len is not None:
-            llm_positions_1d = llm_positions_1d[context_len:seq_len]
+            llm_positions = llm_positions[:, context_len:seq_len]
         elif context_len > 0:
-            llm_positions_1d = llm_positions_1d[context_len:]
-
-        # vLLM expects mrope_positions to be (3, L) shape for MRoPE interface
-        # For OpenCUA, we use 1D sequential positions, so we repeat the same
-        # 1D positions 3 times to match the expected shape
-        # This allows vLLM to use positions[0] (or any row) as the actual position_ids
-        llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
+            llm_positions = llm_positions[:, context_len:]
 
         # Logging
         logger.info(
-            "OpenCUA MRoPE final - llm_positions_1d shape: %s, "
-            "llm_positions shape: %s, llm_positions.max(): %d, "
-            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
-            str(llm_positions_1d.shape),
+            "OpenCUA MRoPE final - llm_positions shape: %s, "
+            "llm_positions.max(): %d, mrope_position_delta: %d, "
+            "context_len: %d, seq_len: %s",
             str(llm_positions.shape),
             llm_positions.max().item(),
             mrope_position_delta,
