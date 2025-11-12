@@ -50,12 +50,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -1395,19 +1390,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         }
 
         def get_replacement_opencua(item_idx: int, modality: str):
-            # Calculate number of vision tokens based on grid_thw
-            # This ensures PlaceholderRange.length matches vision embeddings count
-            # vLLM requires PlaceholderRange.length to match vision token count
-            # for is_multimodal mask generation
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-            # num_tokens = t * h * w // (spatial_merge_size ** 2)
-            spatial_merge_size = hf_config.vision_config.spatial_merge_size
-            merge_length = spatial_merge_size * spatial_merge_size
-            num_tokens = int(grid_thw.prod()) // merge_length
-
-            return [placeholder[modality]] * num_tokens
+            # CRITICAL FIX: Prompt text should have only 1 placeholder token,
+            # not num_tokens. The PlaceholderRange.length is automatically set
+            # from the multimodal embeddings count returned by
+            # get_multimodal_embeddings. We return only 1 placeholder here to
+            # ensure the prompt text has exactly 1 placeholder, matching the
+            # expected behavior.
+            return [placeholder[modality]]
 
         return [
             PromptReplacement(
