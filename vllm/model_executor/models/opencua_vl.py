@@ -1681,31 +1681,23 @@ class OpenCUA_VLForConditionalGeneration(
         video_nums = len(video_grid_thw) if video_grid_thw else 0
 
         # Count actual placeholder tokens in input_tokens
-        # This should match the number of images + videos (after replacement count)
+        # NOTE: In vLLM, vision tokens may already be embedded as placeholder tokens
+        # in input_tokens. The text portion should have exactly
+        # (image_nums + video_nums) placeholder tokens, but the total count may be
+        # larger if vision tokens are already embedded as placeholders.
         placeholder_count_in_input = input_tokens.count(image_token_id)
-        expected_placeholder_count = image_nums + video_nums
+        expected_text_placeholder_count = image_nums + video_nums
 
-        # Logging: placeholder count validation
+        # Logging: placeholder count info (for debugging)
         logger.info(
-            "OpenCUA MRoPE placeholder count - input_tokens placeholder count: %d, "
-            "expected (image_nums + video_nums): %d (images: %d, videos: %d), "
-            "match: %s",
+            "OpenCUA MRoPE placeholder count - input_tokens total placeholder "
+            "count: %d, expected text placeholders: %d (images: %d, videos: %d). "
+            "If total > expected, vision tokens may already be embedded.",
             placeholder_count_in_input,
-            expected_placeholder_count,
+            expected_text_placeholder_count,
             image_nums,
             video_nums,
-            placeholder_count_in_input == expected_placeholder_count,
         )
-
-        if placeholder_count_in_input != expected_placeholder_count:
-            raise ValueError(
-                f"Placeholder count mismatch: input_tokens has "
-                f"{placeholder_count_in_input} <|media_placeholder|> tokens, "
-                f"but expected {expected_placeholder_count} "
-                f"(image_nums={image_nums}, video_nums={video_nums}). "
-                f"This indicates a mismatch between tokenization and "
-                f"multimodal input."
-            )
 
         llm_pos_ids_list: list = []
 
@@ -1714,9 +1706,19 @@ class OpenCUA_VLForConditionalGeneration(
 
         image_index, video_index = 0, 0
         for _ in range(image_nums + video_nums):
+            # Find the next placeholder token in the text portion
+            # If there are consecutive placeholder tokens, they are vision tokens.
+            # We need to find the first placeholder in each consecutive sequence.
             if remain_images > 0:
                 try:
+                    # Find the first occurrence of placeholder from st
                     ed_image = input_tokens.index(image_token_id, st)
+                    # If this placeholder is part of a consecutive sequence,
+                    # find the first one in the sequence (the text placeholder)
+                    while (
+                        ed_image > st and input_tokens[ed_image - 1] == image_token_id
+                    ):
+                        ed_image -= 1
                 except ValueError:
                     ed_image = len(input_tokens) + 1
             else:
@@ -1724,6 +1726,11 @@ class OpenCUA_VLForConditionalGeneration(
             if remain_videos > 0:
                 try:
                     ed_video = input_tokens.index(video_token_id, st)
+                    # Find the first placeholder in consecutive sequence
+                    while (
+                        ed_video > st and input_tokens[ed_video - 1] == video_token_id
+                    ):
+                        ed_video -= 1
                 except ValueError:
                     ed_video = len(input_tokens) + 1
             else:
@@ -1733,6 +1740,13 @@ class OpenCUA_VLForConditionalGeneration(
                     raise IndexError(
                         f"image_index {image_index} >= len(image_grid_thw) "
                         f"{len(image_grid_thw)}"
+                    )
+                if ed_image >= len(input_tokens):
+                    raise ValueError(
+                        f"Could not find image placeholder token at position >= {st}. "
+                        f"This indicates a mismatch between tokenization and "
+                        f"multimodal input. Expected {image_nums} image(s), "
+                        f"but found {image_index} so far."
                     )
                 t, h, w = (
                     image_grid_thw[image_index][0],
@@ -1747,6 +1761,13 @@ class OpenCUA_VLForConditionalGeneration(
                     raise IndexError(
                         f"video_index {video_index} >= len(video_grid_thw) "
                         f"{len(video_grid_thw)}"
+                    )
+                if ed_video >= len(input_tokens):
+                    raise ValueError(
+                        f"Could not find video placeholder token at position >= {st}. "
+                        f"This indicates a mismatch between tokenization and "
+                        f"multimodal input. Expected {video_nums} video(s), "
+                        f"but found {video_index} so far."
                     )
                 t, h, w = (
                     video_grid_thw[video_index][0],
@@ -1858,12 +1879,25 @@ class OpenCUA_VLForConditionalGeneration(
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
             # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
+            # However, if vision tokens are already embedded as placeholders in
+            # input_tokens, we need to skip over them.
+
+            # Find the end of consecutive placeholder tokens (vision tokens)
+            # after the text placeholder at position ed
+            vision_token_end = ed + 1
+            while (
+                vision_token_end < len(input_tokens)
+                and input_tokens[vision_token_end] == image_token_id
+            ):
+                vision_token_end += 1
 
             # Logging: st update validation
             # For single image case, verify st update matches replacement count
             st_before = st
-            st_after = ed + num_visual_tokens
+            # st should advance past the text placeholder and any vision token
+            # placeholders. The actual number of vision tokens is num_visual_tokens,
+            # but if they're already embedded as placeholders, we skip over them
+            st_after = vision_token_end
 
             # Calculate replacement count: ed - st_before should be 1 (the placeholder)
             # After replacement, st should advance by num_visual_tokens
