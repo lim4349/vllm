@@ -835,13 +835,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
         # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
         #                            spatial_merge_unit, rotary_dim // 2]
-        # First flatten to [total_llm_tokens, rotary_dim // 2]
-        # to match token-level indexing
-        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         # window_index_thw is in [0, total_llm_tokens - 1] range
-        # Apply window reordering using window_index_thw directly
-        # This matches how hidden_states is reordered
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :]
+        # Match Qwen2.5-VL: use window_index_thw directly
+        # The indexing works because rotary_pos_emb_thw is already grouped
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -958,12 +956,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
-        # Flatten to [seq_len, -1] first to match token-level indexing
-        hidden_states = hidden_states.flatten(start_dim=0, end_dim=1)
-        # window_index is in [0, total_llm_tokens - 1] range
-        # Apply window reordering using window_index directly
-        # This matches how rotary_pos_emb is reordered
-        hidden_states = hidden_states[window_index, :]
+        # Match Qwen2.5-VL: use window_index directly
+        # The indexing works because hidden_states is already grouped
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
 
