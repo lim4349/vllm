@@ -1320,6 +1320,60 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
         return result
 
+    def _apply_hf_processor_text_mm(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature, bool]:
+        """Override to add guard log for placeholder count after tokenization."""
+        logger = init_logger(__name__)
+
+        # Call parent method to perform actual processing
+        prompt_ids, processed_data, is_update_applied = (
+            super()._apply_hf_processor_text_mm(
+                prompt_text=prompt_text,
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+        )
+
+        # GUARD LOG: Check placeholder count after tokenization
+        # This should be exactly 1 per image/video, not num_tokens
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+        media_placeholder_id = vocab.get("<|media_placeholder|>", None)
+
+        if media_placeholder_id is not None:
+            placeholder_count = prompt_ids.count(media_placeholder_id)
+            expected_count = (
+                len(mm_items.get("image", [])) + len(mm_items.get("video", []))
+            )
+
+            if placeholder_count != expected_count:
+                logger.error(
+                    "OpenCUA GUARD LOG - placeholder count mismatch after "
+                    "tokenization: found %d placeholders, expected %d "
+                    "(images: %d, videos: %d). This indicates premature "
+                    "expansion of placeholders in prompt text. Prompt text "
+                    "should have exactly 1 placeholder per image/video.",
+                    placeholder_count,
+                    expected_count,
+                    len(mm_items.get("image", [])),
+                    len(mm_items.get("video", [])),
+                )
+            else:
+                logger.info(
+                    "OpenCUA GUARD LOG - placeholder count correct after "
+                    "tokenization: %d placeholders (expected %d)",
+                    placeholder_count,
+                    expected_count,
+                )
+
+        return prompt_ids, processed_data, is_update_applied
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
