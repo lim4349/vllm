@@ -835,8 +835,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
         # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
         #                            spatial_merge_unit, rotary_dim // 2]
+        # window_index_thw is in [0, total_llm_tokens - 1] range
+        # rotary_pos_emb_thw first dim is total_llm_tokens // spatial_merge_unit
+        # Divide window_index_thw by spatial_merge_unit to index rotary_pos_emb_thw
+        window_index_for_rope = window_index_thw // self.spatial_merge_unit
         # Apply window reordering (exactly like Qwen2.5-VL)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_for_rope, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
