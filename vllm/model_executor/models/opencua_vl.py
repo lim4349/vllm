@@ -1289,7 +1289,6 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             image_grid_thw = result["image_grid_thw"]
             if isinstance(image_grid_thw, torch.Tensor):
                 grid_thw_list = image_grid_thw.tolist()
-                image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
                 patch_size = getattr(
                     self.info.get_hf_config().vision_config, "patch_size", 14
                 )
@@ -1299,8 +1298,8 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                     processed_pixels = processed_height * processed_width
                     logger.info(
                         "OpenCUA preprocess output - image[%d]: "
-                        "grid_thw=[%d, %d, %d], processed_size=%dx%d (%d pixels), "
-                        "patch_size=%d",
+                        "grid_thw=[%d, %d, %d], processed_size=%dx%d "
+                        "(%d pixels), patch_size=%d",
                         idx,
                         t,
                         h,
