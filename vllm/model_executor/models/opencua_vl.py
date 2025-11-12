@@ -573,7 +573,12 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     ) -> torch.Tensor:
         # OpenCUA uses 1D RoPE, so vision transformer output is
         # already in 1D order. Use simple reshape like Qwen2.5-VL.
-        x = self.ln_q(x)
+        # Input shape: [seq_len, 1, context_dim] or [seq_len, context_dim]
+        # Ensure 2D for LayerNorm: [seq_len, context_dim]
+        if x.dim() == 3:
+            x = x.squeeze(1)  # [seq_len, 1, context_dim] -> [seq_len, context_dim]
+
+        x = self.ln_q(x)  # [seq_len, context_dim] -> [seq_len, context_dim]
 
         # Qwen2.5-VL style: simple view reshape
         # The vision transformer with 1D RoPE outputs patches in
