@@ -756,16 +756,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         # Each token gets a sequential position: 0, 1, 2, ..., total_llm_tokens - 1
         rotary_pos_emb_full = self.rotary_pos_emb_1d(total_llm_tokens)
 
-        # Reshape to match spatial merge unit structure
         # rotary_pos_emb_full shape: [total_llm_tokens, rotary_dim // 2]
-        # Reshape to [total_llm_tokens // spatial_merge_unit,
-        #              spatial_merge_unit, rotary_dim // 2]
-        rotary_pos_emb = rotary_pos_emb_full.reshape(
-            total_llm_tokens // self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            -1,
-        )
-        return rotary_pos_emb
+        # Return without reshaping - reshaping will be done in get_rope_by_thw
+        # after window reordering
+        return rotary_pos_emb_full
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
         vit_merger_window_size = (
@@ -808,8 +802,17 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
-        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        # rotary_pos_emb_thw shape: [total_llm_tokens, rotary_dim // 2]
+        # Apply window reordering
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :]
+        # rotary_pos_emb_thw shape after indexing: [total_llm_tokens, rotary_dim // 2]
+        # Reshape to match spatial merge unit structure
+        # [total_llm_tokens // spatial_merge_unit, spatial_merge_unit, rotary_dim // 2]
+        rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
+            rotary_pos_emb_thw.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
