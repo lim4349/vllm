@@ -657,10 +657,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         # Use config values for window attention and full attention blocks
         # OpenCUA uses window attention for most layers,
         # full attention for specific layers
-        self.window_size = getattr(vision_config, "window_size", 112)
-        self.fullatt_block_indexes = getattr(
-            vision_config, "fullatt_block_indexes", [7, 15, 23, 31]
-        )
+        # Read from vision_config, matching Qwen2.5-VL structure
+        self.window_size = vision_config.window_size
+        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
 
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
@@ -671,6 +670,7 @@ class OpenCUA_VisionTransformer(nn.Module):
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+        # Read rope_theta from vision_config (set in OpenCUA_VLConfig.__init__)
         rope_theta = getattr(vision_config, "rope_theta", 10000.0)
         self.rotary_pos_emb = OpenCUA_VisionRotaryEmbedding(
             head_dim // 2, theta=rope_theta
