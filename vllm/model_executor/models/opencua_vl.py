@@ -1151,21 +1151,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 f"({hf_config.vision_config.spatial_merge_size})"
             )
 
-        merge_length = image_processor.merge_size**2
-        replacement_token_id = {
-            "image": media_placeholder_id,
-            "video": media_placeholder_id,
-        }
         placeholder = {
             "image": media_placeholder_id,
             "video": media_placeholder_id,
         }
 
+        # OpenCUA: Keep only 1 placeholder in template, don't expand to
+        # vision token count. Vision embeddings will be inserted at embedding
+        # stage, not token replacement stage
         def get_replacement_opencua(item_idx: int, modality: str):
-            grid_thw = out_mm_kwargs[modality][item_idx][f"{modality}_grid_thw"].data
-            grid_t, grid_h, grid_w = map(int, grid_thw)
-            num_tokens = (grid_t * grid_h * grid_w) // merge_length
-            return [replacement_token_id[modality]] * num_tokens
+            # Return only 1 placeholder token - vision embeddings will be
+            # inserted at the embedding stage via get_input_embeddings
+            return [placeholder[modality]]
 
         return [
             PromptReplacement(
@@ -1819,61 +1816,31 @@ class OpenCUA_VLForConditionalGeneration(
                 st_idx,
             )
             if text_len > 0:
-                text_positions = (
-                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                )
+                # OpenCUA uses 1D sequential position_ids for LLM
+                # (not 3D MRoPE coordinates)
+                text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
                 llm_pos_ids_list.append(text_positions)
 
-            # OpenCUA uses 1D RoPE for vision transformer, but language model
-            # MRoPE still expects 3D positions. Generate proper 3D positions
-            # for visual tokens (t, h, w dimensions) in sequential order
-            t_index = (
-                torch.arange(llm_grid_t)
-                .view(-1, 1)
-                .expand(-1, llm_grid_h * llm_grid_w)
-                .flatten()
-            )
-            h_index = (
-                torch.arange(llm_grid_h)
-                .view(1, -1, 1)
-                .expand(llm_grid_t, -1, llm_grid_w)
-                .flatten()
-            )
-            w_index = (
-                torch.arange(llm_grid_w)
-                .view(1, 1, -1)
-                .expand(llm_grid_t, llm_grid_h, -1)
-                .flatten()
-            )
-            # visual_positions start after text_len tokens
-            # This matches Qwen2.5-VL logic:
-            # visual_positions = positions + text_len + st_idx
-
-            # Calculate the starting position for visual tokens
-            # After text positions, visual tokens start at text_len + st_idx
+            # OpenCUA uses 1D RoPE for both vision transformer and language model
+            # Generate 1D sequential positions for visual tokens
+            # Visual tokens start after text_len tokens
             visual_start_pos = text_len + st_idx
+            # Sequential positions for visual tokens:
+            # [start, start+1, ..., start+num_visual_tokens-1]
             visual_positions = (
-                torch.stack([t_index, h_index, w_index]) + visual_start_pos
+                torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
 
             # Logging
             logger.info(
                 "OpenCUA MRoPE visual - visual_positions shape: %s, "
                 "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
-                "visual_start_pos: %d, t_index max: %d, h_index max: %d, "
-                "w_index max: %d, visual_positions[0] max: %d, "
-                "visual_positions[1] max: %d, visual_positions[2] max: %d",
+                "visual_start_pos: %d",
                 str(visual_positions.shape),
                 visual_positions.min().item(),
                 visual_positions.max().item(),
                 num_visual_tokens,
                 visual_start_pos,
-                t_index.max().item(),
-                h_index.max().item(),
-                w_index.max().item(),
-                visual_positions[0].max().item(),
-                visual_positions[1].max().item(),
-                visual_positions[2].max().item(),
             )
 
             llm_pos_ids_list.append(visual_positions)
@@ -1954,7 +1921,7 @@ class OpenCUA_VLForConditionalGeneration(
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            text_positions = torch.arange(text_len) + st_idx
+            text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
 
             # Logging
             logger.info(
@@ -1968,30 +1935,39 @@ class OpenCUA_VLForConditionalGeneration(
                 text_positions.max().item(),
             )
 
-            llm_pos_ids_list.append(text_positions.view(1, -1).expand(3, -1))
+            llm_pos_ids_list.append(text_positions)
 
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        # Concatenate all 1D position_ids
+        llm_positions = torch.cat(llm_pos_ids_list, dim=0)
 
-        # Logging before calculating delta
+        # Logging before slicing
         logger.info(
-            "OpenCUA MRoPE before delta - llm_positions shape: %s, "
+            "OpenCUA MRoPE before slice - llm_positions shape: %s, "
             "llm_positions.max(): %d, input_tokens len: %d",
             str(llm_positions.shape),
             llm_positions.max().item(),
             len(input_tokens),
         )
 
-        # mrope_position_delta calculation matches Qwen2.5-VL
-        # This represents the difference between the maximum position
-        # and the input length
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
+        # OpenCUA uses 1D sequential position_ids
+        # No MRoPE delta needed - positions are already sequential
+        # Slice according to context_len and seq_len if provided
+        if seq_len is not None:
+            llm_positions = llm_positions[context_len:seq_len]
+        elif context_len > 0:
+            llm_positions = llm_positions[context_len:]
+
+        # For compatibility with vLLM interface, return delta = 0
+        # (positions are already correct, no adjustment needed)
+        mrope_position_delta = 0
 
         # Logging
         logger.info(
             "OpenCUA MRoPE final - llm_positions shape: %s, "
-            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
+            "llm_positions.max(): %d, mrope_position_delta: %d, "
+            "context_len: %d, seq_len: %s",
             str(llm_positions.shape),
+            llm_positions.max().item(),
             mrope_position_delta,
             context_len,
             seq_len,
