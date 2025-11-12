@@ -1407,39 +1407,7 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             merge_length = spatial_merge_size * spatial_merge_size
             num_tokens = int(grid_thw.prod()) // merge_length
 
-            # CRITICAL FIX: Prompt text should have only 1 placeholder token,
-            # not num_tokens. The num_tokens is used only for PlaceholderRange.length
-            # via PromptUpdateDetails.is_embed, not for the actual prompt text.
-            # Return PromptUpdateDetails with:
-            # - full: 1 placeholder token (for prompt text)
-            # - is_embed: mask indicating all num_tokens positions should get embeddings
-
-            # The prompt text should contain only 1 placeholder
-            single_placeholder = [placeholder[modality]]
-
-            # Create is_embed function that marks all num_tokens positions
-            # This ensures PlaceholderRange.length = num_tokens for is_multimodal mask
-            def is_embed(
-                tokenizer: AnyTokenizer, full: list[int] | str
-            ) -> torch.Tensor:
-                # full should be the single placeholder token
-                # We need to return a mask of length num_tokens
-                # indicating all positions should get embeddings
-                # Expand to num_tokens length
-                # Since we only have 1 placeholder in text, we create a mask
-                # that marks it as the start of num_tokens embedding positions
-                expanded_mask = torch.zeros(num_tokens, dtype=torch.bool)
-                # Mark the first position (the single placeholder) as True
-                # The rest will be handled by vLLM's PlaceholderRange logic
-                expanded_mask[0] = True
-                return expanded_mask
-
-            # Return PromptUpdateDetails with single placeholder in text,
-            # but is_embed function that indicates num_tokens embedding positions
-            return PromptUpdateDetails(
-                full=single_placeholder,
-                is_embed=is_embed,
-            )
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
