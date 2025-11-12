@@ -958,7 +958,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
-        hidden_states = hidden_states[window_index, :, :]
+        # window_index is in [0, total_llm_tokens - 1] range
+        # hidden_states first dim is total_llm_tokens // spatial_merge_unit
+        # Divide window_index by spatial_merge_unit to index hidden_states
+        # This matches the indexing used for rotary_pos_emb
+        window_index_for_hidden = window_index // self.spatial_merge_unit
+        hidden_states = hidden_states[window_index_for_hidden, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
