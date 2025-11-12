@@ -1277,6 +1277,14 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                         orig_pixels,
                     )
 
+        # Log processor kwargs to debug preprocessing differences
+        logger.info(
+            "OpenCUA processor kwargs - hf_processor_mm_kwargs keys: %s, "
+            "tokenization_kwargs keys: %s",
+            list(hf_processor_mm_kwargs.keys()),
+            list(tokenization_kwargs.keys()),
+        )
+
         # Call parent method to perform actual preprocessing
         result = super()._apply_hf_processor_mm_only(
             mm_items=mm_items,
@@ -1394,9 +1402,42 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             merge_length = spatial_merge_size * spatial_merge_size
             num_tokens = int(grid_thw.prod()) // merge_length
 
-            # Return num_tokens placeholders to match vision embeddings count
-            # This is required for vLLM's is_multimodal mask generation
-            return [placeholder[modality]] * num_tokens
+            # CRITICAL FIX: Prompt text should have only 1 placeholder token,
+            # not num_tokens. The num_tokens is used only for PlaceholderRange.length
+            # via PromptUpdateDetails.is_embed, not for the actual prompt text.
+            # Return PromptUpdateDetails with:
+            # - full: 1 placeholder token (for prompt text)
+            # - is_embed: mask indicating all num_tokens positions should get embeddings
+            from vllm.multimodal.processing import PromptUpdateDetails
+
+            # The prompt text should contain only 1 placeholder
+            single_placeholder = [placeholder[modality]]
+
+            # Create is_embed function that marks all num_tokens positions
+            # This ensures PlaceholderRange.length = num_tokens for is_multimodal mask
+            def is_embed(tokenizer: AnyTokenizer, full: PromptSeq) -> torch.Tensor:
+                # full should be the single placeholder token
+                # We need to return a mask of length num_tokens
+                # indicating all positions should get embeddings
+                token_ids = _seq2tokens(tokenizer, full)
+                # Create mask: all positions in the single placeholder should be True
+                # But we need num_tokens positions, so we expand the mask
+                placeholder_mask = torch.tensor(token_ids) == placeholder[modality]
+                # Expand to num_tokens length
+                # Since we only have 1 placeholder in text, we create a mask
+                # that marks it as the start of num_tokens embedding positions
+                expanded_mask = torch.zeros(num_tokens, dtype=torch.bool)
+                # Mark the first position (the single placeholder) as True
+                # The rest will be handled by vLLM's PlaceholderRange logic
+                expanded_mask[0] = True
+                return expanded_mask
+
+            # Return PromptUpdateDetails with single placeholder in text,
+            # but is_embed function that indicates num_tokens embedding positions
+            return PromptUpdateDetails(
+                full=single_placeholder,
+                is_embed=is_embed,
+            )
 
         return [
             PromptReplacement(
