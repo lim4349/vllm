@@ -835,13 +835,13 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
         # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
         #                            spatial_merge_unit, rotary_dim // 2]
-        # window_index_thw is in [0, total_llm_tokens - 1] range
-        # rotary_pos_emb_thw first dim is total_llm_tokens // spatial_merge_unit
-        # Divide window_index_thw by spatial_merge_unit to index rotary_pos_emb_thw
-        window_index_for_rope = window_index_thw // self.spatial_merge_unit
-        # Apply window reordering (exactly like Qwen2.5-VL)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_for_rope, :, :]
+        # First flatten to [total_llm_tokens, rotary_dim // 2]
+        # to match token-level indexing
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        # window_index_thw is in [0, total_llm_tokens - 1] range
+        # Apply window reordering using window_index_thw directly
+        # This matches how hidden_states is reordered
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :]
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -958,13 +958,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
+        # Flatten to [seq_len, -1] first to match token-level indexing
+        hidden_states = hidden_states.flatten(start_dim=0, end_dim=1)
         # window_index is in [0, total_llm_tokens - 1] range
-        # hidden_states first dim is total_llm_tokens // spatial_merge_unit
-        # Divide window_index by spatial_merge_unit to index hidden_states
-        # This matches the indexing used for rotary_pos_emb
-        window_index_for_hidden = window_index // self.spatial_merge_unit
-        hidden_states = hidden_states[window_index_for_hidden, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+        # Apply window reordering using window_index directly
+        # This matches how rotary_pos_emb is reordered
+        hidden_states = hidden_states[window_index, :]
 
         hidden_states = hidden_states.unsqueeze(1)
 
