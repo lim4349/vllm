@@ -742,45 +742,26 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        # For window attention, we need 2D position embeddings
-        # Similar to Qwen2.5-VL: use 2D position IDs for window attention
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-        hpos_ids = (
-            hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
-        wpos_ids = (
-            wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
-        # Use 2D position IDs like Qwen2.5-VL
-        # Stack h and w position IDs and repeat for temporal dimension
-        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        max_size = max(h, w)
-        # rotary_pos_emb returns [max_size, rotary_dim // 2]
-        # We use 2D indexing: rotary_pos_emb[pos_ids] where pos_ids is [t*h*w, 2]
-        rotary_pos_emb_full = self.rotary_pos_emb(max_size)
-        # Index using 2D position IDs: pos_ids[:, 0] for h, pos_ids[:, 1] for w
-        # For 1D RoPE, we use max(h, w) as the sequence length
-        # But we need to map 2D positions to 1D positions
-        # Use hpos_ids * max_size + wpos_ids for 1D mapping
-        pos_ids_1d = pos_ids[:, 0] * max_size + pos_ids[:, 1]
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
-        rotary_pos_emb = rotary_pos_emb.reshape(
-            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
+        # OpenCUA uses 1D RoPE (not 2D/M-RoPE like Qwen2.5-VL)
+        # For window attention, we still use 1D sequential positions
+        # but need to handle spatial merging and window reordering
+
+        # Calculate LLM grid dimensions after spatial merging
+        llm_h = h // self.spatial_merge_size
+        llm_w = w // self.spatial_merge_size
+        total_llm_tokens = t * llm_h * llm_w
+
+        # For 1D RoPE, we use sequential positions
+        # The total sequence length is the number of LLM tokens (after spatial merge)
+        # Each token gets a sequential position: 0, 1, 2, ..., total_llm_tokens - 1
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(total_llm_tokens)
+
+        # Reshape to match spatial merge unit structure
+        # rotary_pos_emb_full shape: [total_llm_tokens, rotary_dim // 2]
+        # Reshape to [total_llm_tokens // spatial_merge_unit,
+        #              spatial_merge_unit, rotary_dim // 2]
+        rotary_pos_emb = rotary_pos_emb_full.reshape(
+            total_llm_tokens // self.spatial_merge_unit,
             self.spatial_merge_unit,
             -1,
         )
