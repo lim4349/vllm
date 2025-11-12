@@ -516,11 +516,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
-                return self.mrope_positions.gpu[:, :num_tokens]
+                positions = self.mrope_positions.gpu[:, :num_tokens]
+                # OpenCUA uses 1D RoPE for LLM, so extract only positions[0]
+                # when model_type is "opencua" (all 3 rows are identical 1D sequential)
+                if (
+                    hasattr(self.model_config, "hf_config")
+                    and hasattr(self.model_config.hf_config, "model_type")
+                    and self.model_config.hf_config.model_type == "opencua"
+                ):
+                    positions = positions[0]
+                return positions
             return self.positions.gpu[:num_tokens]
         else:
             if self.uses_mrope:
-                return self.mrope_positions.gpu[:, num_tokens]
+                positions = self.mrope_positions.gpu[:, num_tokens]
+                # OpenCUA uses 1D RoPE for LLM, so extract only positions[0]
+                # when model_type is "opencua" (all 3 rows are identical 1D sequential)
+                if (
+                    hasattr(self.model_config, "hf_config")
+                    and hasattr(self.model_config.hf_config, "model_type")
+                    and self.model_config.hf_config.model_type == "opencua"
+                ):
+                    positions = positions[0]
+                return positions
             return self.positions.gpu[num_tokens]
 
     def _make_buffer(
@@ -2189,6 +2207,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
+            # OpenCUA uses 1D RoPE for LLM, so extract only positions[0]
+            # when model_type is "opencua" (all 3 rows are identical 1D sequential)
+            if (
+                hasattr(self.model_config, "hf_config")
+                and hasattr(self.model_config.hf_config, "model_type")
+                and self.model_config.hf_config.model_type == "opencua"
+            ):
+                positions = positions[0]
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
@@ -3413,6 +3439,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
+                # OpenCUA uses 1D RoPE for LLM, so extract only positions[0]
+                # when model_type is "opencua" (all 3 rows are identical 1D sequential)
+                if (
+                    hasattr(self.model_config, "hf_config")
+                    and hasattr(self.model_config.hf_config, "model_type")
+                    and self.model_config.hf_config.model_type == "opencua"
+                ):
+                    positions = positions[0]
             else:
                 positions = self.positions.gpu[:num_tokens_after_padding]
 
