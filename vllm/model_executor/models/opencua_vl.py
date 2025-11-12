@@ -1661,6 +1661,28 @@ class OpenCUA_VLForConditionalGeneration(
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
 
+        # Log actual processed image dimensions for text recognition debugging
+        logger = init_logger(__name__)
+        patch_size = self.visual.patch_size
+        for idx, (t, h, w) in enumerate(grid_thw_list):
+            # grid_thw is in patch units, convert to pixels
+            actual_height = h * patch_size
+            actual_width = w * patch_size
+            num_patches = t * h * w
+            logger.info(
+                "OpenCUA image processing - image[%d]: grid_thw=[%d, %d, %d] "
+                "(patches), actual_size=%dx%d (pixels), num_patches=%d, "
+                "patch_size=%d. Higher resolution improves text recognition.",
+                idx,
+                t,
+                h,
+                w,
+                actual_height,
+                actual_width,
+                num_patches,
+                patch_size,
+            )
+
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
