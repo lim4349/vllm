@@ -1443,14 +1443,26 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
         # Log token synchronization for debugging
         logger = init_logger(__name__)
+        
+        # Check for other media-related tokens from chat_template
+        # According to tokenizer_config.json, chat_template uses:
+        # '<|media_begin|>image<|media_content|><|media_placeholder|><|media_end|>'
+        media_begin_id = vocab.get("<|media_begin|>", -1)
+        media_content_id = vocab.get("<|media_content|>", -1)
+        media_end_id = vocab.get("<|media_end|>", -1)
+        
         logger.info(
             "OpenCUA token IDs synced with tokenizer - "
             "media_placeholder_token_id: %d, image_token_id: %d, "
-            "video_token_id: %d, image_token: '%s'",
+            "video_token_id: %d, image_token: '%s', "
+            "media_begin_id: %d, media_content_id: %d, media_end_id: %d",
             media_placeholder_id,
             media_placeholder_id,
             media_placeholder_id,
             image_token,
+            media_begin_id,
+            media_content_id,
+            media_end_id,
         )
 
         # Verify token exists in vocab
@@ -1972,28 +1984,9 @@ class OpenCUA_VLForConditionalGeneration(
         # vLLM interface requires (3, L) shape for MRoPE compatibility,
         # but RotaryEmbedding.flatten() will incorrectly process (3, L) positions
         # Solution: Extract positions[0] as 1D position_ids before passing to model
-        logger = init_logger(__name__)
-        input_ids_len = len(input_ids) if input_ids is not None else -1
-        logger.info(
-            "OpenCUA forward - positions shape: %s, positions.ndim: %d, "
-            "positions min: %d, positions max: %d, input_ids len: %d",
-            str(positions.shape),
-            positions.ndim,
-            positions.min().item() if positions.numel() > 0 else -1,
-            positions.max().item() if positions.numel() > 0 else -1,
-            input_ids_len,
-        )
-        
+        # Note: In practice, vLLM may already pass 1D positions during generation,
+        # so we handle both cases
         positions_1d = positions[0] if positions.ndim == 2 else positions
-        
-        logger.info(
-            "OpenCUA forward - positions_1d shape: %s, positions_1d.ndim: %d, "
-            "positions_1d min: %d, positions_1d max: %d",
-            str(positions_1d.shape),
-            positions_1d.ndim,
-            positions_1d.min().item() if positions_1d.numel() > 0 else -1,
-            positions_1d.max().item() if positions_1d.numel() > 0 else -1,
-        )
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
