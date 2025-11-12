@@ -2014,7 +2014,6 @@ class OpenCUA_VLForConditionalGeneration(
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
-        logger = init_logger(__name__)
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
@@ -2026,44 +2025,8 @@ class OpenCUA_VLForConditionalGeneration(
         video_token_id = hf_config.video_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
-        # Logging
-        logger.info(
-            "OpenCUA MRoPE positions - input_tokens len: %d, "
-            "image_nums: %d, video_nums: %d, "
-            "image_token_id: %d, video_token_id: %d, "
-            "spatial_merge_size: %d",
-            len(input_tokens),
-            len(image_grid_thw) if image_grid_thw else 0,
-            len(video_grid_thw) if video_grid_thw else 0,
-            image_token_id,
-            video_token_id,
-            spatial_merge_size,
-        )
-
-        # OpenCUA uses Kimi-VL style: only <|media_placeholder|> token,
-        # no vision_start/end tokens
-        # Use image_grid_thw and video_grid_thw lengths to get actual counts
         image_nums = len(image_grid_thw) if image_grid_thw else 0
         video_nums = len(video_grid_thw) if video_grid_thw else 0
-
-        # Count actual placeholder tokens in input_tokens
-        # NOTE: In vLLM, vision tokens may already be embedded as placeholder tokens
-        # in input_tokens. The text portion should have exactly
-        # (image_nums + video_nums) placeholder tokens, but the total count may be
-        # larger if vision tokens are already embedded as placeholders.
-        placeholder_count_in_input = input_tokens.count(image_token_id)
-        expected_text_placeholder_count = image_nums + video_nums
-
-        # Logging: placeholder count info (for debugging)
-        logger.info(
-            "OpenCUA MRoPE placeholder count - input_tokens total placeholder "
-            "count: %d, expected text placeholders: %d (images: %d, videos: %d). "
-            "If total > expected, vision tokens may already be embedded.",
-            placeholder_count_in_input,
-            expected_text_placeholder_count,
-            image_nums,
-            video_nums,
-        )
 
         llm_pos_ids_list: list = []
 
@@ -2152,138 +2115,37 @@ class OpenCUA_VLForConditionalGeneration(
             # text_len includes all text tokens before the placeholder token
             # The placeholder token at position ed will be replaced with visual tokens
             text_len = ed - st
+            # st_idx is the starting position index for this segment
+            # It should be the maximum position from previous segments + 1
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
-            # Logging
-            logger.info(
-                "OpenCUA MRoPE segment - st: %d, ed: %d, text_len: %d, "
-                "grid_thw: [%d, %d, %d] (patch units), "
-                "llm_grid: [%d, %d, %d], num_visual_tokens: %d, st_idx: %d",
-                st,
-                ed,
-                text_len,
-                t,
-                h,
-                w,
-                llm_grid_t,
-                llm_grid_h,
-                llm_grid_w,
-                num_visual_tokens,
-                st_idx,
-            )
             if text_len > 0:
                 # OpenCUA uses 1D sequential position_ids for LLM
-                # (not 3D MRoPE coordinates)
+                # Text positions: [st_idx, st_idx+1, ..., st_idx+text_len-1]
                 text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
                 llm_pos_ids_list.append(text_positions)
+                # After text, visual tokens start at st_idx + text_len
+                visual_start_pos = st_idx + text_len
+            else:
+                # If no text before placeholder, visual tokens start at st_idx
+                visual_start_pos = st_idx
 
             # OpenCUA uses 1D RoPE for both vision transformer and language model
             # Generate 1D sequential positions for visual tokens
-            # Visual tokens start after text_len tokens
-            visual_start_pos = text_len + st_idx
-            # Sequential positions for visual tokens:
-            # [start, start+1, ..., start+num_visual_tokens-1]
+            # Visual positions: [visual_start_pos, visual_start_pos+1, ...,
+            #                    visual_start_pos+num_visual_tokens-1]
             visual_positions = (
                 torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
 
-            # Logging
-            logger.info(
-                "OpenCUA MRoPE visual - visual_positions shape: %s, "
-                "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
-                "visual_start_pos: %d",
-                str(visual_positions.shape),
-                visual_positions.min().item(),
-                visual_positions.max().item(),
-                num_visual_tokens,
-                visual_start_pos,
-            )
-
             llm_pos_ids_list.append(visual_positions)
-            # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # Match Qwen2VL's behavior: st = ed + num_visual_tokens
-            # This represents the position in the expanded sequence (after placeholder
-            # expansion), not the actual input_tokens index
-
-            # Logging: st update validation
-            # For single image case, verify st update matches replacement count
-            st_before = st
-            # Match Qwen2VL: st advances by num_visual_tokens (the expanded size)
-            # This is the position in the expanded sequence, not input_tokens index
-            st_after = ed + num_visual_tokens
-
-            # Calculate text length and placeholder count
-            # text_len = ed - st_before is the number of text tokens before placeholder
-            # placeholder_count = 1 (there's exactly 1 placeholder at position ed)
-            text_len_before_placeholder = ed - st_before
-            placeholder_count = 1  # Each image/video has exactly 1 placeholder in text
-            # How many tokens st advances past placeholder
-            # (should equal num_visual_tokens)
-            st_advance = st_after - ed
-
-            logger.info(
-                "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
-                "st before: %d, st after: %d, "
-                "text_len_before_placeholder: %d, "
-                "placeholder_count: %d (should be 1), "
-                "st_advance (st_after - ed): %d "
-                "(should equal num_visual_tokens: %d)",
-                ed,
-                num_visual_tokens,
-                st_before,
-                st_after,
-                text_len_before_placeholder,
-                placeholder_count,
-                st_advance,
-                num_visual_tokens,
-            )
-
-            # Validation: For single image case, verify st update logic
-            if image_nums == 1 and video_nums == 0:
-                if placeholder_count != 1:
-                    logger.warning(
-                        "Single image case: placeholder_count = %d "
-                        "(expected 1 for single placeholder)",
-                        placeholder_count,
-                    )
-                if st_advance != num_visual_tokens:
-                    raise ValueError(
-                        f"Single image case: st update mismatch. "
-                        f"st_advance = {st_advance}, but num_visual_tokens = "
-                        f"{num_visual_tokens}. This indicates incorrect "
-                        f"st update logic."
-                    )
-                logger.info(
-                    "Single image case validation - text_len_before_placeholder: %d, "
-                    "placeholder_count: %d, st_advance: %d, num_visual_tokens: %d, "
-                    "st_advance_match: %s",
-                    text_len_before_placeholder,
-                    placeholder_count,
-                    st_advance,
-                    num_visual_tokens,
-                    st_advance == num_visual_tokens,
-                )
-
-            st = st_after
+            # Update st: in input_tokens, skip the placeholder token and move to next
+            st = ed + 1
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
-
-            # Logging
-            logger.info(
-                "OpenCUA MRoPE remaining text - st: %d, len(input_tokens): %d, "
-                "text_len: %d, st_idx: %d, text_positions min: %d, max: %d",
-                st,
-                len(input_tokens),
-                text_len,
-                st_idx,
-                text_positions.min().item(),
-                text_positions.max().item(),
-            )
-
             llm_pos_ids_list.append(text_positions)
 
         # Concatenate all 1D position_ids
@@ -2294,15 +2156,6 @@ class OpenCUA_VLForConditionalGeneration(
         else:
             # All tensors in llm_pos_ids_list are 1D, so concatenate along dim=0
             llm_positions_1d = torch.cat(llm_pos_ids_list, dim=0)
-
-        # Logging before slicing
-        logger.info(
-            "OpenCUA MRoPE before slice - llm_positions_1d shape: %s, "
-            "llm_positions_1d.max(): %d, input_tokens len: %d",
-            str(llm_positions_1d.shape),
-            llm_positions_1d.max().item(),
-            len(input_tokens),
-        )
 
         # For OpenCUA, we use 1D sequential positions (not 3D MRoPE coordinates)
         # The positions are already correctly calculated, so delta should be 0
@@ -2318,36 +2171,9 @@ class OpenCUA_VLForConditionalGeneration(
 
         # vLLM expects mrope_positions to be (3, L) shape for MRoPE interface
         # However, OpenCUA uses 1D RoPE, not 3D MRoPE
-        # For 1D RoPE, we should pass positions as 1D, but vLLM interface requires
-        # (3, L). Solution: Use positions[0] as the actual 1D position_ids.
-        # Regular RotaryEmbedding (not MRotaryEmbedding) will use positions[0] as
-        # 1D position_ids when mrope_section is not set.
+        # Expand 1D positions to (3, L) for interface compatibility
+        # RotaryEmbedding will use positions[0] as 1D position_ids
         llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
-
-        # Logging: final positions shape and values
-        logger.info(
-            "OpenCUA MRoPE final positions - llm_positions shape: %s, "
-            "llm_positions[0] min: %d, llm_positions[0] max: %d, "
-            "llm_positions_1d len: %d, input_tokens len: %d",
-            str(llm_positions.shape),
-            llm_positions[0].min().item() if llm_positions.numel() > 0 else -1,
-            llm_positions[0].max().item() if llm_positions.numel() > 0 else -1,
-            len(llm_positions_1d),
-            len(input_tokens),
-        )
-
-        # Logging
-        logger.info(
-            "OpenCUA MRoPE final - llm_positions_1d shape: %s, "
-            "llm_positions shape: %s, llm_positions.max(): %d, "
-            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
-            str(llm_positions_1d.shape),
-            str(llm_positions.shape),
-            llm_positions.max().item(),
-            mrope_position_delta,
-            context_len,
-            seq_len,
-        )
 
         return llm_positions, mrope_position_delta
 
