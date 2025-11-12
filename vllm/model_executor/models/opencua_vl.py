@@ -867,8 +867,9 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
-        # NOTE: This function is not used in OpenCUA (no window reordering)
-        # Kept for compatibility but should never be called
+        # OpenCUA uses window reordering like Qwen2.5-VL
+        # This function computes the inverse permutation to restore original order
+        # after window attention processing
         # building the inverse permutation in O(n) time
         inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
@@ -971,7 +972,8 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        hidden_states = self.merger(hidden_states, grid_thw=grid_thw)
+        # Qwen2.5-VL style: merger doesn't need grid_thw
+        hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
