@@ -654,6 +654,14 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
 
+        # Use config values for window attention and full attention blocks
+        # OpenCUA uses window attention for most layers,
+        # full attention for specific layers
+        self.window_size = getattr(vision_config, "window_size", 112)
+        self.fullatt_block_indexes = getattr(
+            vision_config, "fullatt_block_indexes", [7, 15, 23, 31]
+        )
+
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
@@ -708,13 +716,9 @@ class OpenCUA_VisionTransformer(nn.Module):
             ]
         )
 
-        # OpenCUA uses sequential-only processing (1D RoPE)
-        # Force all layers to use full attention (no window attention)
-        # Override any config setting to ensure all blocks use full attention
-        self.fullatt_block_indexes = list(range(depth))
-        # Also update config if it exists
-        if hasattr(vision_config, "fullatt_block_indexes"):
-            vision_config.fullatt_block_indexes = self.fullatt_block_indexes
+        # OpenCUA uses config-defined fullatt_block_indexes
+        # Most layers use window attention, specific layers use full attention
+        # This matches the HF config: fullatt_block_indexes=[7, 15, 23, 31]
 
         self.merger = OpenCUA_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
@@ -736,6 +740,96 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     def rotary_pos_emb_1d(self, seq_len: int):
         return self.rotary_pos_emb(seq_len)
+
+    def rotary_pos_emb_thw(self, t, h, w):
+        # For window attention, we need 2D position embeddings
+        # Similar to Qwen2.5-VL but using 1D RoPE for OpenCUA
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        hpos_ids = (
+            hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        wpos_ids = (
+            wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        # For 1D RoPE, we use sequential positions
+        # But we still need to handle window reordering
+        max_size = max(h, w)
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(max_size * max_size)
+        # Flatten and reshape for window attention
+        rotary_pos_emb = rotary_pos_emb_full[: t * h * w].reshape(
+            t * h * w // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+        return rotary_pos_emb
+
+    def get_window_index_thw(self, grid_t, grid_h, grid_w):
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
+
+        llm_grid_h = grid_h // self.spatial_merge_size
+        llm_grid_w = grid_w // self.spatial_merge_size
+        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+            grid_t, llm_grid_h, llm_grid_w
+        )
+        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
+        index_padded = index_padded.reshape(
+            grid_t,
+            num_windows_h,
+            vit_merger_window_size,
+            num_windows_w,
+            vit_merger_window_size,
+        )
+        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
+            grid_t,
+            num_windows_h * num_windows_w,
+            vit_merger_window_size,
+            vit_merger_window_size,
+        )
+        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+        index_padded = index_padded.reshape(-1)
+        index_new = index_padded[index_padded != -100]
+        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
+        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
+        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        return index_new, cu_seqlens_tmp
+
+    @lru_cache(maxsize=1024)  # noqa: B019
+    def get_rope_by_thw(self, t, h, w):
+        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
+        rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        cu_seqlens_thw = torch.repeat_interleave(
+            torch.tensor([h * w], dtype=torch.int32), t
+        )
+        return (
+            rotary_pos_emb_thw,
+            window_index_thw,
+            cu_seqlens_window_thw,
+            cu_seqlens_thw,
+        )
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
@@ -780,92 +874,99 @@ class OpenCUA_VisionTransformer(nn.Module):
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
         # patchify
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
-        hidden_states = self.patch_embed(hidden_states)  # [seq, dim]
-        seq_len, _ = hidden_states.size()  # Get seq_len after patch_embed
+        seq_len, _ = x.size()
         rotary_pos_emb = []
+        window_index: list = []
+        cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        logger = init_logger(__name__)
+        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.patch_embed(hidden_states)
+
+        window_index_id = 0
+        cu_window_seqlens_last = 0
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
-            rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
+            llm_h = h // self.spatial_merge_size
+            llm_w = w // self.spatial_merge_size
 
-            # Logging
-            logger.info(
-                "OpenCUA VisionTransformer 1D RoPE - grid_thw: [%d, %d, %d], "
-                "rotary_pos_emb_1d shape: %s, cu_seqlens_1d: %s",
-                t,
-                h,
-                w,
-                str(rotary_pos_emb_1d.shape),
-                str(cu_seqlens_1d),
-            )
+            (
+                rotary_pos_emb_thw,
+                window_index_thw,
+                cu_seqlens_window_thw,
+                cu_seqlens_thw,
+            ) = self.get_rope_by_thw(t, h, w)
 
-            rotary_pos_emb.append(rotary_pos_emb_1d)
-            cu_seqlens.append(cu_seqlens_1d)
+            window_index.append(window_index_thw + window_index_id)
+            window_index_id += t * llm_h * llm_w
+
+            cu_seqlens_window_thw = cu_seqlens_window_thw + cu_window_seqlens_last
+            cu_window_seqlens_last = cu_seqlens_window_thw[-1]
+            cu_window_seqlens.append(cu_seqlens_window_thw)
+
+            rotary_pos_emb.append(rotary_pos_emb_thw)
+
+            cu_seqlens.append(cu_seqlens_thw)
 
         rotary_pos_emb = torch.cat(rotary_pos_emb)
+        window_index = torch.cat(window_index)
+        # compute reverse indices
+        reverse_indices = self.invert_permutation(window_index)
+        cu_window_seqlens = torch.cat(cu_window_seqlens)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
-        # Critical validation: cu_seqlens[-1] must equal seq_len
-        # This ensures the merge/length scale is correct
-        # cu_seqlens is prefix-sum with leading 0, last value == total seq_len
-        if cu_seqlens[-1].item() != seq_len:
-            raise ValueError(
-                f"cu_seqlens[-1] ({cu_seqlens[-1].item()}) != seq_len ({seq_len}). "
-                f"This indicates a merge/length scale mismatch. "
-                f"cu_seqlens: {cu_seqlens.tolist()}, "
-                f"hidden_states shape: {hidden_states.shape}"
-            )
-
-        # Logging
-        logger.info(
-            "OpenCUA VisionTransformer - rotary_pos_emb shape: %s, "
-            "cu_seqlens: %s (last=%d), hidden_states shape: %s, seq_len: %d",
-            str(rotary_pos_emb.shape),
-            str(cu_seqlens),
-            cu_seqlens[-1].item(),
-            str(hidden_states.shape),
-            seq_len,
+        # transformers
+        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
+        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
+            cu_window_seqlens
         )
 
-        hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+        cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
+        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
+        window_index = window_index.to(device=hidden_states.device, non_blocking=True)
+        reverse_indices = reverse_indices.to(
+            device=hidden_states.device, non_blocking=True
+        )
 
-        # OpenCUA uses sequential-only processing (1D RoPE)
-        # All layers use full attention - no window attention or reordering
-        # No gather/scatter or window indexing is performed
-        # All blocks process in sequential order with the same cu_seqlens
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        hidden_states = hidden_states.unsqueeze(1)
+
         for layer_num, blk in enumerate(self.blocks):
-            # All layers use full attention (fullatt_block_indexes contains all layers)
-            # No window-based cu_seqlens or reordering needed
+            if layer_num in self.fullatt_block_indexes:
+                cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen_full
+                seqlens_now = seqlens_full
+            else:
+                cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_seqlen_window
+                seqlens_now = seqlens_window
+
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
+                cu_seqlens=cu_seqlens_now,
                 rotary_pos_emb=rotary_pos_emb,
-                max_seqlen=max_seqlen_full,
-                seqlens=seqlens_full,
+                max_seqlen=max_seqlen_now,
+                seqlens=seqlens_now,
             )
 
+        # For Qwen2.5-VL-3B, float16 will overflow at last block
+        # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # Pass to merger without squeezing (matches Qwen2.5-VL behavior)
-        # Merger expects [seq_len, 1, context_dim] shape
+        # adapter
         hidden_states = self.merger(hidden_states, grid_thw=grid_thw)
-
-        # Logging
-        logger.info(
-            "OpenCUA VisionTransformer output - shape: %s, dtype: %s",
-            str(hidden_states.shape),
-            str(hidden_states.dtype),
-        )
-
+        hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1251,16 +1352,9 @@ class OpenCUA_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
-            # Ensure all layers use full attention (sequential-only processing)
-            # Override config and model attributes after initialization
-            depth = len(self.visual.blocks)
-            self.visual.fullatt_block_indexes = list(range(depth))
-            if hasattr(config.vision_config, "fullatt_block_indexes"):
-                config.vision_config.fullatt_block_indexes = list(range(depth))
-            if hasattr(self.visual, "config") and hasattr(
-                self.visual.config, "fullatt_block_indexes"
-            ):
-                self.visual.config.fullatt_block_indexes = list(range(depth))
+            # Use config-defined fullatt_block_indexes
+            # Most layers use window attention, specific layers use full attention
+            # This matches the HF config: fullatt_block_indexes=[7, 15, 23, 31]
 
             text_config = getattr(config, "text_config", None)
             if text_config is None:
