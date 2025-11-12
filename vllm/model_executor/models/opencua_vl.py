@@ -1242,6 +1242,77 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             second_per_grid_ts=MultiModalFieldConfig.batched("video"),
         )
 
+    def _apply_hf_processor_mm_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """Override to log image preprocessing details for debugging."""
+        logger = init_logger(__name__)
+
+        # Log original image dimensions before preprocessing
+        if "image" in mm_items and mm_items["image"]:
+            for idx, image_item in enumerate(mm_items["image"]):
+                # Try to get original image size from various possible attributes
+                orig_size = None
+                if hasattr(image_item, "data"):
+                    img_data = image_item.data
+                    if hasattr(img_data, "size"):
+                        orig_size = img_data.size
+                    elif hasattr(img_data, "width") and hasattr(img_data, "height"):
+                        orig_size = (img_data.width, img_data.height)
+                elif hasattr(image_item, "width") and hasattr(image_item, "height"):
+                    orig_size = (image_item.width, image_item.height)
+
+                if orig_size:
+                    orig_width, orig_height = orig_size
+                    orig_pixels = orig_width * orig_height
+                    logger.info(
+                        "OpenCUA preprocess input - image[%d]: "
+                        "original_size=%dx%d (%d pixels)",
+                        idx,
+                        orig_width,
+                        orig_height,
+                        orig_pixels,
+                    )
+
+        # Call parent method to perform actual preprocessing
+        result = super()._apply_hf_processor_mm_only(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        # Log processed image dimensions after preprocessing
+        if "image_grid_thw" in result:
+            image_grid_thw = result["image_grid_thw"]
+            if isinstance(image_grid_thw, torch.Tensor):
+                grid_thw_list = image_grid_thw.tolist()
+                image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+                patch_size = getattr(
+                    self.info.get_hf_config().vision_config, "patch_size", 14
+                )
+                for idx, (t, h, w) in enumerate(grid_thw_list):
+                    processed_height = h * patch_size
+                    processed_width = w * patch_size
+                    processed_pixels = processed_height * processed_width
+                    logger.info(
+                        "OpenCUA preprocess output - image[%d]: "
+                        "grid_thw=[%d, %d, %d], processed_size=%dx%d (%d pixels), "
+                        "patch_size=%d",
+                        idx,
+                        t,
+                        h,
+                        w,
+                        processed_width,
+                        processed_height,
+                        processed_pixels,
+                        patch_size,
+                    )
+
+        return result
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
