@@ -538,7 +538,10 @@ class ModelConfig:
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
-        # Ensure OpenCUA text_config has rope_scaling for uses_mrope
+        # OpenCUA uses 1D RoPE, not 3D MRoPE
+        # Do NOT set mrope_section for OpenCUA, as it uses regular RotaryEmbedding
+        # MRotaryEmbedding expects 3D positions (T, H, W), but OpenCUA uses 1D sequential positions
+        # If mrope_section is set, remove it to use regular RotaryEmbedding
         if (
             hasattr(hf_config, "model_type")
             and hf_config.model_type == "opencua"
@@ -547,29 +550,13 @@ class ModelConfig:
             text_config = hf_config.get_text_config()
             if text_config:
                 rope_scaling = getattr(text_config, "rope_scaling", None)
-                if (
-                    rope_scaling is None
-                    or not isinstance(rope_scaling, dict)
-                    or "mrope_section" not in rope_scaling
-                ):
-                    # Calculate mrope_section for 1D RoPE
-                    head_dim = getattr(text_config, "head_dim", None)
-                    if head_dim is None:
-                        head_dim = (
-                            text_config.hidden_size // text_config.num_attention_heads
-                        )
-                    rotary_dim = head_dim
-                    # Split rotary_dim // 2 equally across 3 dimensions
-                    section_size = (rotary_dim // 2) // 3
-                    remainder = (rotary_dim // 2) % 3
-                    mrope_section = [section_size] * 3
-                    # Distribute remainder to first dimensions
-                    for i in range(remainder):
-                        mrope_section[i] += 1
-                    text_config.rope_scaling = {
-                        "rope_type": "default",
-                        "mrope_section": mrope_section,
-                    }
+                if isinstance(rope_scaling, dict) and "mrope_section" in rope_scaling:
+                    # Remove mrope_section to use regular RotaryEmbedding for 1D RoPE
+                    rope_scaling = {k: v for k, v in rope_scaling.items() if k != "mrope_section"}
+                    if not rope_scaling:
+                        text_config.rope_scaling = None
+                    else:
+                        text_config.rope_scaling = rope_scaling
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None

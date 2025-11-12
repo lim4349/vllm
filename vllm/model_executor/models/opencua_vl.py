@@ -1076,24 +1076,26 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
         config = self.ctx.get_hf_config(OpenCUA_VLConfig)
         text_config = config.get_text_config()
         if text_config:
+            # OpenCUA uses 1D RoPE, not 3D MRoPE
+            # Do NOT set mrope_section, as it will cause MRotaryEmbedding to be used
+            # which expects 3D positions (T, H, W), but OpenCUA uses 1D sequential
+            # positions. If rope_scaling is not set, leave it as None to use regular
+            # RotaryEmbedding
             rope_scaling = getattr(text_config, "rope_scaling", None)
-            if (
-                rope_scaling is None
-                or not isinstance(rope_scaling, dict)
-                or "mrope_section" not in rope_scaling
-            ):
-                head_dim = getattr(text_config, "head_dim", None) or (
-                    text_config.hidden_size // text_config.num_attention_heads
-                )
-                section_size = (head_dim // 2) // 3
-                remainder = (head_dim // 2) % 3
-                mrope_section = [section_size] * 3
-                for i in range(remainder):
-                    mrope_section[i] += 1
-                text_config.rope_scaling = {
-                    "rope_type": "default",
-                    "mrope_section": mrope_section,
+            if rope_scaling is None:
+                # OpenCUA uses 1D RoPE, so we don't need rope_scaling
+                # The default RotaryEmbedding will be used
+                pass
+            elif isinstance(rope_scaling, dict) and "mrope_section" in rope_scaling:
+                # If mrope_section is set, remove it to use regular RotaryEmbedding
+                # OpenCUA uses 1D RoPE, not 3D MRoPE
+                rope_scaling = {
+                    k: v for k, v in rope_scaling.items() if k != "mrope_section"
                 }
+                if not rope_scaling:
+                    text_config.rope_scaling = None
+                else:
+                    text_config.rope_scaling = rope_scaling
         # Sync token IDs with tokenizer to ensure consistency
         # This is critical for correct tokenization and model behavior
         try:
@@ -2151,28 +2153,19 @@ class OpenCUA_VLForConditionalGeneration(
             )
             if text_len > 0:
                 # OpenCUA uses 1D sequential position_ids for LLM
-                # For MRoPE interface compatibility, convert to 3D format
-                # by repeating the same value for all 3 dimensions
-                text_positions_1d = torch.arange(text_len, dtype=torch.long) + st_idx
-                # Convert to 3D format: repeat the same 1D position for all 3 dims
-                # Shape: (3, text_len)
-                text_positions = text_positions_1d.unsqueeze(0).expand(3, -1)
+                # (not 3D MRoPE coordinates)
+                text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
                 llm_pos_ids_list.append(text_positions)
 
             # OpenCUA uses 1D RoPE for both vision transformer and language model
-            # However, for MRoPE interface compatibility, we need to provide
-            # positions in the same format as Qwen2VL (3D coordinates)
-            # Generate 1D sequential positions for visual tokens, then convert
-            # to 3D format by repeating the same value for all 3 dimensions
+            # Generate 1D sequential positions for visual tokens
+            # Visual tokens start after text_len tokens
             visual_start_pos = text_len + st_idx
-            # For MRoPE compatibility, create 3D positions where all dimensions
-            # have the same sequential value (since OpenCUA uses 1D RoPE)
-            visual_positions_1d = (
+            # Sequential positions for visual tokens:
+            # [start, start+1, ..., start+num_visual_tokens-1]
+            visual_positions = (
                 torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
-            # Convert to 3D format: repeat the same 1D position for all 3 dims
-            # Shape: (3, num_visual_tokens)
-            visual_positions = visual_positions_1d.unsqueeze(0).expand(3, -1)
 
             # Logging
             logger.info(
@@ -2273,35 +2266,50 @@ class OpenCUA_VLForConditionalGeneration(
 
             llm_pos_ids_list.append(text_positions)
 
-        # Concatenate all 3D position_ids (each is shape (3, L))
-        # Concatenate along dimension 1 (sequence length)
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1)
+        # Concatenate all 1D position_ids
+        # For 1D tensors, we need to concatenate them along dimension 0
+        # to create a single 1D tensor
+        if len(llm_pos_ids_list) == 0:
+            llm_positions_1d = torch.tensor([], dtype=torch.long)
+        else:
+            # All tensors in llm_pos_ids_list are 1D, so concatenate along dim=0
+            llm_positions_1d = torch.cat(llm_pos_ids_list, dim=0)
 
         # Logging before slicing
         logger.info(
-            "OpenCUA MRoPE before slice - llm_positions shape: %s, "
-            "llm_positions.max(): %d, input_tokens len: %d",
-            str(llm_positions.shape),
-            llm_positions.max().item(),
+            "OpenCUA MRoPE before slice - llm_positions_1d shape: %s, "
+            "llm_positions_1d.max(): %d, input_tokens len: %d",
+            str(llm_positions_1d.shape),
+            llm_positions_1d.max().item(),
             len(input_tokens),
         )
 
-        # Calculate mrope_position_delta similar to Qwen2VL
-        mrope_position_delta = (
-            llm_positions.max().item() + 1 - len(input_tokens)
-        )
+        # For OpenCUA, we use 1D sequential positions (not 3D MRoPE coordinates)
+        # The positions are already correctly calculated, so delta should be 0
+        # This is different from Qwen2VL which uses 3D MRoPE coordinates
+        mrope_position_delta = 0
 
+        # OpenCUA uses 1D sequential position_ids
         # Slice according to context_len and seq_len if provided
         if seq_len is not None:
-            llm_positions = llm_positions[:, context_len:seq_len]
+            llm_positions_1d = llm_positions_1d[context_len:seq_len]
         elif context_len > 0:
-            llm_positions = llm_positions[:, context_len:]
+            llm_positions_1d = llm_positions_1d[context_len:]
+
+        # vLLM expects mrope_positions to be (3, L) shape for MRoPE interface
+        # However, OpenCUA uses 1D RoPE, not 3D MRoPE
+        # For 1D RoPE, we should pass positions as 1D, but vLLM interface requires
+        # (3, L). Solution: Use positions[0] as the actual 1D position_ids.
+        # Regular RotaryEmbedding (not MRotaryEmbedding) will use positions[0] as
+        # 1D position_ids when mrope_section is not set.
+        llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
 
         # Logging
         logger.info(
-            "OpenCUA MRoPE final - llm_positions shape: %s, "
-            "llm_positions.max(): %d, mrope_position_delta: %d, "
-            "context_len: %d, seq_len: %s",
+            "OpenCUA MRoPE final - llm_positions_1d shape: %s, "
+            "llm_positions shape: %s, llm_positions.max(): %d, "
+            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
+            str(llm_positions_1d.shape),
             str(llm_positions.shape),
             llm_positions.max().item(),
             mrope_position_delta,
