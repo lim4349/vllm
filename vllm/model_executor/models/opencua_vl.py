@@ -757,9 +757,14 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_full = self.rotary_pos_emb_1d(total_llm_tokens)
 
         # rotary_pos_emb_full shape: [total_llm_tokens, rotary_dim // 2]
-        # Return without reshaping - reshaping will be done in get_rope_by_thw
-        # after window reordering
-        return rotary_pos_emb_full
+        # Reshape to match spatial merge unit structure (like Qwen2.5-VL)
+        # This allows window_index_thw to be used directly in get_rope_by_thw
+        rotary_pos_emb = rotary_pos_emb_full.reshape(
+            total_llm_tokens // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+        return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
         vit_merger_window_size = (
@@ -802,20 +807,14 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        # rotary_pos_emb_thw shape: [total_llm_tokens, rotary_dim // 2]
-        # Reshape to match spatial merge unit structure for window reordering
-        # [total_llm_tokens // spatial_merge_unit, spatial_merge_unit, rotary_dim // 2]
-        rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
-            rotary_pos_emb_thw.shape[0] // self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            -1,
-        )
+        # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
+        #                            spatial_merge_unit, rotary_dim // 2]
         # window_index_thw is in range [0, total_llm_tokens - 1]
         # but rotary_pos_emb_thw first dimension is
         # total_llm_tokens // spatial_merge_unit
         # So we need to divide window_index_thw by spatial_merge_unit
         window_index_thw_reshaped = window_index_thw // self.spatial_merge_unit
-        # Apply window reordering
+        # Apply window reordering (like Qwen2.5-VL)
         rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw_reshaped, :, :]
         # Flatten to [total_llm_tokens, rotary_dim // 2] for attention
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
