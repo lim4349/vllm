@@ -1156,13 +1156,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "video": media_placeholder_id,
         }
 
-        # OpenCUA: Keep only 1 placeholder in template, don't expand to
-        # vision token count. Vision embeddings will be inserted at embedding
-        # stage, not token replacement stage
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        merge_length = spatial_merge_size * spatial_merge_size
+
         def get_replacement_opencua(item_idx: int, modality: str):
-            # Return only 1 placeholder token - vision embeddings will be
-            # inserted at the embedding stage via get_input_embeddings
-            return [placeholder[modality]]
+            # Calculate number of vision tokens based on grid_thw
+            # This ensures PlaceholderRange.length matches vision embeddings count
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            # num_tokens = t * h * w // (spatial_merge_size ** 2)
+            num_tokens = int(grid_thw.prod()) // merge_length
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
