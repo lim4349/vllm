@@ -1973,6 +1973,7 @@ class OpenCUA_VLForConditionalGeneration(
         # but RotaryEmbedding.flatten() will incorrectly process (3, L) positions
         # Solution: Extract positions[0] as 1D position_ids before passing to model
         logger = init_logger(__name__)
+        input_ids_len = len(input_ids) if input_ids is not None else -1
         logger.info(
             "OpenCUA forward - positions shape: %s, positions.ndim: %d, "
             "positions min: %d, positions max: %d, input_ids len: %d",
@@ -1980,7 +1981,7 @@ class OpenCUA_VLForConditionalGeneration(
             positions.ndim,
             positions.min().item() if positions.numel() > 0 else -1,
             positions.max().item() if positions.numel() > 0 else -1,
-            len(input_ids),
+            input_ids_len,
         )
         
         positions_1d = positions[0] if positions.ndim == 2 else positions
