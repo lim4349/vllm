@@ -1972,7 +1972,27 @@ class OpenCUA_VLForConditionalGeneration(
         # vLLM interface requires (3, L) shape for MRoPE compatibility,
         # but RotaryEmbedding.flatten() will incorrectly process (3, L) positions
         # Solution: Extract positions[0] as 1D position_ids before passing to model
+        logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA forward - positions shape: %s, positions.ndim: %d, "
+            "positions min: %d, positions max: %d, input_ids len: %d",
+            str(positions.shape),
+            positions.ndim,
+            positions.min().item() if positions.numel() > 0 else -1,
+            positions.max().item() if positions.numel() > 0 else -1,
+            len(input_ids),
+        )
+        
         positions_1d = positions[0] if positions.ndim == 2 else positions
+        
+        logger.info(
+            "OpenCUA forward - positions_1d shape: %s, positions_1d.ndim: %d, "
+            "positions_1d min: %d, positions_1d max: %d",
+            str(positions_1d.shape),
+            positions_1d.ndim,
+            positions_1d.min().item() if positions_1d.numel() > 0 else -1,
+            positions_1d.max().item() if positions_1d.numel() > 0 else -1,
+        )
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -2309,6 +2329,18 @@ class OpenCUA_VLForConditionalGeneration(
         # Regular RotaryEmbedding (not MRotaryEmbedding) will use positions[0] as
         # 1D position_ids when mrope_section is not set.
         llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
+
+        # Logging: final positions shape and values
+        logger.info(
+            "OpenCUA MRoPE final positions - llm_positions shape: %s, "
+            "llm_positions[0] min: %d, llm_positions[0] max: %d, "
+            "llm_positions_1d len: %d, input_tokens len: %d",
+            str(llm_positions.shape),
+            llm_positions[0].min().item() if llm_positions.numel() > 0 else -1,
+            llm_positions[0].max().item() if llm_positions.numel() > 0 else -1,
+            len(llm_positions_1d),
+            len(input_tokens),
+        )
 
         # Logging
         logger.info(
