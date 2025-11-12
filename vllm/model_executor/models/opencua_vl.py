@@ -771,12 +771,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         max_size = max(h, w)
         # For 1D RoPE: map 2D positions to 1D sequential positions
         # hpos_ids and wpos_ids values are in [0, h-1] and [0, w-1] range
-        # Use max_size * max_size to cover all possible 2D positions
-        # Calculate required size and ensure cache is large enough
-        required_size = max_size * max_size
-        # Also account for the maximum possible pos_ids_1d value
+        # Mapping: pos_1d = hpos * max_size + wpos
+        # This ensures unique mapping for all (hpos, wpos) pairs
+        # Calculate the maximum possible pos_ids_1d value
         max_pos_1d = (h - 1) * max_size + (w - 1)
-        required_size = max(required_size, max_pos_1d + 1)
+        required_size = max_pos_1d + 1
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
         pos_ids_1d = pos_ids[:, 0] * max_size + pos_ids[:, 1]
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
