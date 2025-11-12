@@ -2179,33 +2179,32 @@ class OpenCUA_VLForConditionalGeneration(
 
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # Since we now keep only 1 placeholder in template, we advance st by
-            # ed + num_visual_tokens (the placeholder at ed is replaced with
-            # num_visual_tokens vision embeddings)
+            # num_visual_tokens tokens. The next text starts after the placeholder.
+            # st is an index into input_tokens, so we advance by 1 (past the
+            # placeholder). The visual tokens are handled separately in position
+            # encoding
 
             # Logging: st update validation
             # For single image case, verify st update matches replacement count
             st_before = st
-            # st should advance past the placeholder (at ed) and the visual tokens
-            # The placeholder at position ed is replaced with num_visual_tokens
-            # vision embeddings, so st = ed + num_visual_tokens
-            st_after = ed + num_visual_tokens
+            # st is an index into input_tokens, so we advance past the placeholder
+            # The placeholder at position ed is a single token, so st = ed + 1
+            st_after = ed + 1
 
             # Calculate text length and placeholder count
             # text_len = ed - st_before is the number of text tokens before placeholder
             # placeholder_count = 1 (there's exactly 1 placeholder at position ed)
             text_len_before_placeholder = ed - st_before
             placeholder_count = 1  # Each image/video has exactly 1 placeholder in text
-            st_advance = st_after - ed  # How many tokens st advances past placeholder
+            # How many tokens st advances past placeholder (should be 1)
+            st_advance = st_after - ed
 
             logger.info(
                 "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
                 "st before: %d, st after: %d, "
                 "text_len_before_placeholder: %d, "
                 "placeholder_count: %d (should be 1), "
-                "st_advance (st_after - ed): %d "
-                "(should equal num_visual_tokens: %d)",
+                "st_advance (st_after - ed): %d (should be 1)",
                 ed,
                 num_visual_tokens,
                 st_before,
@@ -2213,7 +2212,6 @@ class OpenCUA_VLForConditionalGeneration(
                 text_len_before_placeholder,
                 placeholder_count,
                 st_advance,
-                num_visual_tokens,
             )
 
             # Validation: For single image case, verify st update logic
@@ -2224,22 +2222,20 @@ class OpenCUA_VLForConditionalGeneration(
                         "(expected 1 for single placeholder)",
                         placeholder_count,
                     )
-                if st_advance != num_visual_tokens:
+                if st_advance != 1:
                     raise ValueError(
                         f"Single image case: st update mismatch. "
-                        f"st_advance = {st_advance}, but num_visual_tokens = "
-                        f"{num_visual_tokens}. This indicates incorrect "
-                        f"st update logic."
+                        f"st_advance = {st_advance}, but should be 1 "
+                        f"(st is an index into input_tokens, placeholder is 1 token)."
                     )
                 logger.info(
                     "Single image case validation - text_len_before_placeholder: %d, "
-                    "placeholder_count: %d, st_advance: %d, num_visual_tokens: %d, "
-                    "st_advance_match: %s",
+                    "placeholder_count: %d, st_advance: %d (should be 1), "
+                    "num_visual_tokens: %d",
                     text_len_before_placeholder,
                     placeholder_count,
                     st_advance,
                     num_visual_tokens,
-                    st_advance == num_visual_tokens,
                 )
 
             st = st_after
@@ -2275,6 +2271,11 @@ class OpenCUA_VLForConditionalGeneration(
             len(input_tokens),
         )
 
+        # For OpenCUA, we use 1D sequential positions (not 3D MRoPE coordinates)
+        # The positions are already correctly calculated, so delta should be 0
+        # This is different from Qwen2VL which uses 3D MRoPE coordinates
+        mrope_position_delta = 0
+
         # OpenCUA uses 1D sequential position_ids
         # Slice according to context_len and seq_len if provided
         if seq_len is not None:
@@ -2287,16 +2288,6 @@ class OpenCUA_VLForConditionalGeneration(
         # 1D positions 3 times to match the expected shape
         # This allows vLLM to use positions[0] (or any row) as the actual position_ids
         llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
-
-        # Calculate mrope_position_delta similar to Qwen2VL:
-        # delta = (max_position + 1) - len(input_tokens)
-        # This represents the difference between the position encoding range
-        # and the actual input token count (due to placeholder expansion)
-        # For OpenCUA, this should be: (max_position + 1) - len(input_tokens)
-        # where max_position is the maximum position ID used
-        mrope_position_delta = (
-            llm_positions_1d.max().item() + 1 - len(input_tokens)
-        )
 
         # Logging
         logger.info(
