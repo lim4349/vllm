@@ -1167,7 +1167,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
             # num_tokens = t * h * w // (spatial_merge_size ** 2)
             num_tokens = int(grid_thw.prod()) // merge_length
-            return [placeholder[modality]] * num_tokens
+
+            # Use PromptUpdateDetails to ensure all positions are embeddings
+            # full contains num_tokens placeholders, all of which are embeddings
+            from vllm.multimodal.processing import PromptUpdateDetails
+
+            full_tokens = [placeholder[modality]] * num_tokens
+            return PromptUpdateDetails.from_seq(full_tokens)
 
         return [
             PromptReplacement(
