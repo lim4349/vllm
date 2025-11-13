@@ -2282,6 +2282,14 @@ class OpenCUA_VLForConditionalGeneration(
     ) -> torch.Tensor:
         """Override to use custom image feature merging logic."""
         logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA get_input_embeddings: CALLED - "
+            "input_ids shape: %s, multimodal_embeddings: %s, "
+            "is_multimodal: %s",
+            tuple(input_ids.shape) if input_ids is not None else None,
+            "present" if multimodal_embeddings is not None else "None",
+            "present" if is_multimodal is not None else "None",
+        )
 
         if multimodal_embeddings is not None:
             logger.info(
@@ -2431,13 +2439,23 @@ class OpenCUA_VLForConditionalGeneration(
         MINIMAL PATCH: Merge is done in get_input_embeddings,
         forward just uses standard vLLM flow.
         """
+        logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA forward: CALLED - "
+            "input_ids shape: %s, inputs_embeds shape: %s, "
+            "positions shape: %s, cached_position_ids: %s",
+            tuple(input_ids.shape) if input_ids is not None else None,
+            tuple(inputs_embeds.shape) if inputs_embeds is not None else None,
+            tuple(positions.shape) if positions is not None else None,
+            "present" if self._cached_position_ids is not None else "None",
+        )
+        
         if intermediate_tensors is not None:
             inputs_embeds = None
 
         # MINIMAL PATCH: Use cached position_ids from HF merge if available
         # This ensures we use the exact same position_ids as HuggingFace
         if self._cached_position_ids is not None and inputs_embeds is not None:
-            logger = init_logger(__name__)
             logger.info(
                 "OpenCUA forward: Overriding positions with cached position_ids - "
                 "cached shape: %s, original positions shape: %s",
@@ -2479,7 +2497,6 @@ class OpenCUA_VLForConditionalGeneration(
                 self._cached_position_ids = None
                 return hidden_states
             else:
-                logger = init_logger(__name__)
                 logger.warning(
                     "OpenCUA forward: Cached position_ids shape mismatch - "
                     "cached: %s, expected: (%d, %d), using default positions",
