@@ -790,40 +790,40 @@ class OpenCUA_VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
-        vit_merger_window_size = (
-            self.window_size // self.spatial_merge_size // self.patch_size
-        )
+        """
+        OpenCUA는 윈도우 어텐션을 쓰지 않으므로,
+        전체 이미지를 하나의 시퀀스로 간주해서
+        window_index_thw 를 identity 로 만든다.
+        cu_seqlens_window_thw 는 patch 단위 길이 누적값만 넘겨준다.
+        """
 
+        # grid_* 는 patch 단위 그리드
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
-        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
-            grid_t, llm_grid_h, llm_grid_w
+
+        # LLM 토큰 개수 (spatial merge 이후 토큰 수)
+        total_llm_tokens = grid_t * llm_grid_h * llm_grid_w
+
+        # 윈도우 어텐션을 안 쓰므로,
+        # 단순히 0..total_llm_tokens-1 까지 identity permutation
+        index_new = torch.arange(
+            total_llm_tokens,
+            dtype=torch.int32,
+            device=self.device,
         )
-        # Match Qwen2.5-VL padding logic exactly
-        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
-        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
-        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
-        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
-        index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
-        index_padded = index_padded.reshape(
-            grid_t,
-            num_windows_h,
-            vit_merger_window_size,
-            num_windows_w,
-            vit_merger_window_size,
+
+        # seqlens: "윈도우마다 몇 개의 LLM 토큰이 들어가는지"
+        # 여기서는 윈도우가 1개뿐 → [total_llm_tokens]
+        seqlens = torch.tensor(
+            [total_llm_tokens],
+            dtype=torch.int32,
+            device=self.device,
         )
-        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
-            grid_t,
-            num_windows_h * num_windows_w,
-            vit_merger_window_size,
-            vit_merger_window_size,
-        )
-        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
-        index_padded = index_padded.reshape(-1)
-        index_new = index_padded[index_padded != -100]
-        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
-        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
-        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        # Qwen2.5-VL 코드와 동일하게 patch 단위로 맞추기 위해
+        # spatial_merge_unit(=merge_size^2)를 곱해준다.
+        # 마지막 값 = 총 patch 개수 = h * w * t
+        cu_seqlens_tmp = (seqlens.cumsum(0) * self.spatial_merge_unit).to(torch.int32)
 
         return index_new, cu_seqlens_tmp
 
