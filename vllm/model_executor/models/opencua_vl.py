@@ -807,30 +807,14 @@ class OpenCUA_VisionTransformer(nn.Module):
             .flatten()
         )
 
-        # For 1D RoPE: use sequential positions after spatial merge permutation
-        # After spatial merge permutation, we have llm_h * llm_w tokens per frame
-        # Assign sequential 1D positions (0, 1, 2, ...) to tokens in permutation order
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_tokens = t * llm_h * llm_w
-
-        # Sequential positions: 0, 1, 2, ..., llm_h * llm_w - 1 per frame
-        # This matches the order after spatial merge permutation
-        pos_ids_1d_per_frame = torch.arange(llm_h * llm_w)
-
-        # Repeat for temporal dimension and add frame offsets
-        pos_ids_1d = pos_ids_1d_per_frame.unsqueeze(0).repeat(t, 1)
+        pos_ids_1d = torch.arange(llm_h * llm_w).unsqueeze(0).repeat(t, 1)
         frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
         pos_ids_1d = (pos_ids_1d + frame_offsets).flatten()
-
-        # Generate 1D RoPE for all positions
-        required_size = total_tokens
-        rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
-
-        # Index into 1D RoPE using sequential positions
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(total_tokens)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
-
-        # Reshape to match spatial_merge_unit grouping
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
