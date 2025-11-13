@@ -2120,20 +2120,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         IntermediateTensors | None,
         dict[str, Any],
     ]:
-        # DEBUG: Log entry to _preprocess
-        import os
-        debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
-        try:
-            with open(debug_file, "a") as f:
-                f.write(
-                    f"[GPUModelRunner._preprocess] ENTRY - "
-                    f"num_input_tokens={num_input_tokens}, "
-                    f"model_type={type(self.model).__name__}\n"
-                )
-                f.flush()
-        except Exception:
-            pass
-        
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
 
@@ -2151,40 +2137,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            # DEBUG: Log before calling get_input_embeddings
-            import os
-            debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[GPUModelRunner._preprocess] About to call model.get_input_embeddings - "
-                        f"supports_mm_inputs={self.supports_mm_inputs}, "
-                        f"is_first_rank={is_first_rank}, "
-                        f"is_encoder_decoder={self.model_config.is_encoder_decoder}, "
-                        f"model_type={type(self.model).__name__}, "
-                        f"mm_embeds={len(mm_embeds) if mm_embeds else 0}, "
-                        f"is_mm_embed={is_mm_embed is not None}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-            
             inputs_embeds_scheduled = self.model.get_input_embeddings(
                 self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
             )
-            
-            # DEBUG: Log after calling get_input_embeddings
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[GPUModelRunner._preprocess] After calling model.get_input_embeddings - "
-                        f"inputs_embeds_scheduled shape={tuple(inputs_embeds_scheduled.shape)}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
@@ -2195,59 +2152,41 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-        else:
-            # DEBUG: Log when get_input_embeddings is NOT called
-            import os
-            debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[GPUModelRunner._preprocess] NOT calling model.get_input_embeddings - "
-                        f"supports_mm_inputs={self.supports_mm_inputs}, "
-                        f"is_first_rank={is_first_rank}, "
-                        f"is_encoder_decoder={self.model_config.is_encoder_decoder}, "
-                        f"enable_prompt_embeds={self.enable_prompt_embeds}, "
-                        f"model_type={type(self.model).__name__}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-            
-            if self.enable_prompt_embeds and is_first_rank:
-                # Get the input embeddings for the tokens that are not input embeds,
-                # then put them into the appropriate positions.
-                # TODO(qthequartermasterman): Since even when prompt embeds are
-                # enabled, (a) not all requests will use prompt embeds, and (b)
-                # after the initial prompt is processed, the rest of the generated
-                # tokens will be token ids, it is not desirable to have the
-                # embedding layer outside of the CUDA graph all the time. The v0
-                # engine avoids this by "double compiling" the CUDA graph, once
-                # with input_ids and again with inputs_embeds, for all num_tokens.
-                # If a batch only has token ids, then including the embedding layer
-                # in the CUDA graph will be more performant (like in the else case
-                # below).
-                token_ids_idx = (
-                    self.is_token_ids.gpu[:num_scheduled_tokens]
-                    .nonzero(as_tuple=False)
-                    .squeeze(1)
-                )
-                # Some tokens ids may need to become embeds
-                if token_ids_idx.numel() > 0:
-                    token_ids = self.input_ids.gpu[token_ids_idx]
-                    tokens_to_embeds = self.model.get_input_embeddings(input_ids=token_ids)
-                    self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
+        elif self.enable_prompt_embeds and is_first_rank:
+            # Get the input embeddings for the tokens that are not input embeds,
+            # then put them into the appropriate positions.
+            # TODO(qthequartermasterman): Since even when prompt embeds are
+            # enabled, (a) not all requests will use prompt embeds, and (b)
+            # after the initial prompt is processed, the rest of the generated
+            # tokens will be token ids, it is not desirable to have the
+            # embedding layer outside of the CUDA graph all the time. The v0
+            # engine avoids this by "double compiling" the CUDA graph, once
+            # with input_ids and again with inputs_embeds, for all num_tokens.
+            # If a batch only has token ids, then including the embedding layer
+            # in the CUDA graph will be more performant (like in the else case
+            # below).
+            token_ids_idx = (
+                self.is_token_ids.gpu[:num_scheduled_tokens]
+                .nonzero(as_tuple=False)
+                .squeeze(1)
+            )
+            # Some tokens ids may need to become embeds
+            if token_ids_idx.numel() > 0:
+                token_ids = self.input_ids.gpu[token_ids_idx]
+                tokens_to_embeds = self.model.get_input_embeddings(input_ids=token_ids)
+                self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
-                inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
-                model_kwargs = self._init_model_kwargs(num_input_tokens)
-                input_ids = None
-            else:
-                # For text-only models, we use token ids as input.
-                # While it is possible to use embeddings as input just like the
-                # multimodal models, it is not desirable for performance since
-                # then the embedding layer is not included in the CUDA graph.
-                input_ids = self.input_ids.gpu[:num_input_tokens]
-                inputs_embeds = None
-                model_kwargs = self._init_model_kwargs(num_input_tokens)
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            input_ids = None
+        else:
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids.gpu[:num_input_tokens]
+            inputs_embeds = None
+            model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         else:
