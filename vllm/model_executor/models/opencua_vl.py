@@ -837,8 +837,6 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        window_index_groups = window_index_thw // self.spatial_merge_unit
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_groups, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
@@ -952,12 +950,6 @@ class OpenCUA_VisionTransformer(nn.Module):
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
         )
-
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
 
