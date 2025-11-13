@@ -692,12 +692,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
 
-        # Use config values for window attention and full attention blocks
-        # OpenCUA uses window attention for most layers,
-        # full attention for specific layers
-        # Read from vision_config, matching Qwen2.5-VL structure
+        # OpenCUA: Use sequential (full) attention for all layers
+        # Disable window attention - use full sequential attention instead
+        # This matches the behavior when Google logo was correctly recognized
         self.window_size = vision_config.window_size
-        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
+        # Force all layers to use full attention (no window attention)
+        self.fullatt_block_indexes = list(range(depth))  # All layers use full attention
 
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
@@ -1004,30 +1004,20 @@ class OpenCUA_VisionTransformer(nn.Module):
             device=hidden_states.device, non_blocking=True
         )
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-
+        # OpenCUA: Use sequential (full) attention - skip window reordering
+        # Don't apply window_index reordering - keep patches in original order
+        # This matches the behavior when Google logo was correctly recognized
         hidden_states = hidden_states.unsqueeze(1)
 
+        # All layers use full sequential attention (no window attention)
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-                max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
-            else:
-                cu_seqlens_now = cu_window_seqlens
-                max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
-
+            # Always use full attention (cu_seqlens, not cu_window_seqlens)
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens_now,
+                cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
-                max_seqlen=max_seqlen_now,
-                seqlens=seqlens_now,
+                max_seqlen=max_seqlen_full,
+                seqlens=seqlens_full,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -1036,9 +1026,9 @@ class OpenCUA_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        # Qwen2.5-VL style: merger doesn't need grid_thw
+        # OpenCUA: No reverse_indices needed since we didn't apply window reordering
+        hidden_states = hidden_states.squeeze(1)  # Remove batch dimension
         hidden_states = self.merger(hidden_states)
-        hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
