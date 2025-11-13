@@ -1908,11 +1908,48 @@ class OpenCUA_VLForConditionalGeneration(
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
+                    image_embeds_list = run_dp_sharded_mrope_vision_model(
                         self.visual, pixel_values, grid_thw_list, rope_type="rope_1d"
                     )
+                    # For data parallel, return early (already split)
+                    # Log each item separately
+                    logger = init_logger(__name__)
+                    for idx, embeds in enumerate(image_embeds_list):
+                        logger.info(
+                            "[vLLM] image_features[%d] shape = %s",
+                            idx,
+                            str(tuple(embeds.shape)),
+                        )
+                        logger.info(
+                            "[vLLM] image_features[%d] dtype = %s",
+                            idx,
+                            str(embeds.dtype),
+                        )
+                        logger.info(
+                            "[vLLM] feature_lengths[%d] = [%d]",
+                            idx,
+                            embeds.shape[0],
+                        )
+                        logger.info(
+                            "[vLLM] image_features[%d] stats - mean: %.6f, std: %.6f",
+                            idx,
+                            embeds.float().mean().item(),
+                            embeds.float().std().item(),
+                        )
+                    return image_embeds_list
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+
+        # Log image_embeds before splitting (matches HF format)
+        logger = init_logger(__name__)
+        logger.info(
+            "[vLLM] image_features shape = %s",
+            str(tuple(image_embeds.shape)),
+        )
+        logger.info(
+            "[vLLM] image_features dtype = %s",
+            str(image_embeds.dtype),
+        )
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1922,7 +1959,43 @@ class OpenCUA_VLForConditionalGeneration(
             // (merge_size * merge_size)
         ).tolist()
 
-        return image_embeds.split(sizes)
+        logger.info(
+            "[vLLM] feature_lengths = %s",
+            str(sizes),
+        )
+
+        # Log stats before splitting (for first image, or concatenated)
+        if len(sizes) == 1:
+            logger.info(
+                "[vLLM] image_features stats - mean: %.6f, std: %.6f",
+                image_embeds.float().mean().item(),
+                image_embeds.float().std().item(),
+            )
+        else:
+            # Log concatenated stats
+            logger.info(
+                "[vLLM] image_features (concatenated) stats - mean: %.6f, std: %.6f",
+                image_embeds.float().mean().item(),
+                image_embeds.float().std().item(),
+            )
+
+        image_embeds_list = image_embeds.split(sizes)
+
+        # Log each split item
+        for idx, embeds in enumerate(image_embeds_list):
+            logger.info(
+                "[vLLM] image_features[%d] (after split) shape = %s",
+                idx,
+                str(tuple(embeds.shape)),
+            )
+            logger.info(
+                "[vLLM] image_features[%d] (after split) stats - mean: %.6f, std: %.6f",
+                idx,
+                embeds.float().mean().item(),
+                embeds.float().std().item(),
+            )
+
+        return image_embeds_list
 
     def _process_video_input(
         self, video_input: OpenCUA_VLVideoInputs
