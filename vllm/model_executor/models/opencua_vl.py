@@ -1547,14 +1547,10 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
             return [placeholder[modality]] * num_tokens
 
-        return [
-            PromptReplacement(
-                modality=modality,
-                target=[placeholder[modality]],
-                replacement=partial(get_replacement_opencua, modality=modality),
-            )
-            for modality in ("image", "video")
-        ]
+        # MINIMAL PATCH: Disable placeholder expansion to ensure HF-style merge path
+        # This ensures input_ids has exactly 1 placeholder per image/video
+        # which triggers HF-style merge in get_input_embeddings
+        return []
 
     def _apply_prompt_updates(
         self,
@@ -2319,35 +2315,17 @@ class OpenCUA_VLForConditionalGeneration(
                 "https://github.com/vllm-project/vllm/pull/16229."
             )
 
-        # CRITICAL DECISION POINT: Choose merge strategy
-        # Check if input_ids has original placeholders (1 per image) or expanded ones
-        image_token_index = self.config.media_placeholder_token_id
-        num_placeholders_in_input = (input_ids == image_token_index).sum().item()
-        num_multimodal_items = len(multimodal_embeddings)
-        total_image_tokens = sum(e.shape[0] for e in multimodal_embeddings)
-
-        logger.info(
-            "OpenCUA get_input_embeddings: merge strategy decision - "
-            "num_placeholders_in_input=%d, num_multimodal_items=%d, "
-            "total_image_tokens=%d, is_multimodal_sum=%d",
-            num_placeholders_in_input,
-            num_multimodal_items,
-            total_image_tokens,
-            is_multimodal.sum().item() if is_multimodal is not None else 0,
-        )
-
-        # Strategy 1: If input_ids has exactly 1 placeholder per image (HF style)
-        # Use HF's _merge_input_ids_with_image_features
-        if num_placeholders_in_input == num_multimodal_items:
+        # MINIMAL PATCH: Always use HF-style merge for debugging
+        # This ensures we use the exact same merge logic as HuggingFace
+        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             logger.info(
-                "OpenCUA: Using HF-style merge (original placeholders detected)"
+                "OpenCUA get_input_embeddings: Using HF-style merge (minimal patch)"
             )
             from vllm.model_executor.models.utils import _flatten_embeddings
 
             image_features_flat = _flatten_embeddings(multimodal_embeddings)
             feature_lengths = [e.shape[0] for e in multimodal_embeddings]
 
-            # Use custom merging logic
             attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
             (
                 final_embedding,
@@ -2365,26 +2343,19 @@ class OpenCUA_VLForConditionalGeneration(
             # Cache position_ids for use in forward
             self._cached_position_ids = position_ids
             logger.info(
-                "OpenCUA get_input_embeddings: Cached position_ids shape: %s",
+                "OpenCUA get_input_embeddings: HF merge complete - "
+                "final_embedding shape: %s, position_ids shape: %s",
+                tuple(final_embedding.shape),
                 tuple(position_ids.shape) if position_ids is not None else None,
             )
             return final_embedding
 
-        # Strategy 2: If input_ids already has expanded placeholders (vLLM style)
-        # Use vLLM's generic merge with is_multimodal mask
-        else:
-            logger.info(
-                "OpenCUA: Using vLLM-style merge (expanded placeholders detected)"
-            )
-            from vllm.model_executor.models.utils import _merge_multimodal_embeddings
-
-            # Clear cached position_ids when using vLLM merge
-            self._cached_position_ids = None
-            return _merge_multimodal_embeddings(
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-            )
+        # No multimodal inputs, return text embeddings only
+        logger.info(
+            "OpenCUA get_input_embeddings: No multimodal inputs, "
+            "returning text embeddings"
+        )
+        return inputs_embeds
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         logger = init_logger(__name__)
@@ -2445,175 +2416,14 @@ class OpenCUA_VLForConditionalGeneration(
         """
         OpenCUA custom forward with HF-style merge.
         
-        PATCH SKETCH:
-        - Use cached position_ids from get_input_embeddings if available
-        - Otherwise fallback to standard vLLM flow
+        MINIMAL PATCH: Merge is done in get_input_embeddings,
+        forward just uses standard vLLM flow.
         """
-        logger = init_logger(__name__)
-        
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # If we have cached position_ids from HF-style merge, use them
-        # by overriding positions parameter
-        if self._cached_position_ids is not None and inputs_embeds is not None:
-            logger.info(
-                "OpenCUA forward: Using cached position_ids from HF merge - "
-                "shape: %s, positions shape: %s",
-                tuple(self._cached_position_ids.shape),
-                tuple(positions.shape),
-            )
-            # Use cached position_ids instead of vLLM's positions
-            # Extract the first row (all rows are the same for 1D RoPE)
-            if self._cached_position_ids.ndim == 2:
-                # Shape: (batch_size, seq_len)
-                cached_positions = self._cached_position_ids
-            else:
-                cached_positions = self._cached_position_ids
-
-            # Ensure positions match the batch size and sequence length
-            batch_size = inputs_embeds.shape[0]
-            seq_len = inputs_embeds.shape[1]
-            
-            if (
-                cached_positions.shape[0] == batch_size
-                and cached_positions.shape[1] == seq_len
-            ):
-                # Use cached positions, but ensure it matches the expected format
-                # vLLM expects positions to be flattened for the batch
-                positions_flat = cached_positions.flatten()
-                
-                logger.info(
-                    "OpenCUA forward: Overriding positions with cached position_ids"
-                )
-                
-                hidden_states = self.language_model.model(
-                    input_ids=None,  # Use inputs_embeds instead
-                    positions=positions_flat,  # Use cached position_ids
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
-                
-                # Clear cache after use
-                self._cached_position_ids = None
-                return hidden_states
-            else:
-                logger.warning(
-                    "OpenCUA forward: Cached position_ids shape mismatch - "
-                    "cached: %s, expected: (%d, %d), using default positions",
-                    tuple(cached_positions.shape),
-                    batch_size,
-                    seq_len,
-                )
-                # Clear invalid cache
-                self._cached_position_ids = None
-
-        # Check if we have multimodal inputs in kwargs
-        # vLLM may pass pixel_values, image_grid_thw, etc. via kwargs
-        has_multimodal = (
-            "pixel_values" in kwargs
-            or "image_embeds" in kwargs
-            or "pixel_values_videos" in kwargs
-            or "video_embeds" in kwargs
-        )
-
-        # If inputs_embeds is None and we have multimodal inputs,
-        # perform HF-style merge directly in forward
-        if inputs_embeds is None and has_multimodal:
-            logger.info(
-                "OpenCUA forward: Performing HF-style merge directly in forward"
-            )
-
-            # 1. Process vision inputs to get image_features and feature_lengths
-            mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
-            if mm_input_by_modality:
-                multimodal_embeddings_list = []
-                feature_lengths_list = []
-
-                for modality in mm_input_by_modality:
-                    multimodal_input = mm_input_by_modality[modality]
-                    if modality == "image":
-                        vision_embeddings = self._process_image_input(multimodal_input)
-                        multimodal_embeddings_list.extend(vision_embeddings)
-                        # Calculate feature_lengths from grid_thw
-                        grid_thw = multimodal_input["image_grid_thw"]
-                        merge_size = self.visual.spatial_merge_size
-                        if isinstance(grid_thw, torch.Tensor):
-                            grid_thw_list = grid_thw.tolist()
-                        else:
-                            grid_thw_list = grid_thw
-                        for t, h, w in grid_thw_list:
-                            feature_lengths_list.append(
-                                int(t * h * w) // (merge_size * merge_size)
-                            )
-                    elif modality == "video":
-                        video_embeddings = self._process_video_input(multimodal_input)
-                        multimodal_embeddings_list.extend(video_embeddings)
-                        # Calculate feature_lengths from grid_thw
-                        grid_thw = multimodal_input["video_grid_thw"]
-                        merge_size = self.visual.spatial_merge_size
-                        if isinstance(grid_thw, torch.Tensor):
-                            grid_thw_list = grid_thw.tolist()
-                        else:
-                            grid_thw_list = grid_thw
-                        for t, h, w in grid_thw_list:
-                            feature_lengths_list.append(
-                                int(t * h * w) // (merge_size * merge_size)
-                            )
-
-                if multimodal_embeddings_list:
-                    # 2. Get text embeddings
-                    text_embeds = self._get_text_embeddings(
-                        input_ids,
-                        self.get_language_model().get_input_embeddings,
-                        is_multimodal=None,
-                        handle_oov_mm_token=False,
-                    )
-
-                    # 3. Flatten image features and merge using HF method
-                    from vllm.model_executor.models.utils import _flatten_embeddings
-
-                    image_features_flat = _flatten_embeddings(
-                        multimodal_embeddings_list
-                    )
-                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
-
-                    # 4. Use HF-style merge
-                    (
-                        final_embedding,
-                        final_attention_mask,
-                        _,
-                        position_ids,
-                    ) = self._merge_input_ids_with_image_features(
-                        image_features=image_features_flat,
-                        feature_lengths=feature_lengths_list,
-                        inputs_embeds=text_embeds,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        labels=None,
-                    )
-
-                    logger.info(
-                        "OpenCUA forward: HF merge complete - "
-                        "final_embedding shape: %s, position_ids shape: %s",
-                        tuple(final_embedding.shape),
-                        tuple(position_ids.shape) if position_ids is not None else None,
-                    )
-
-                    # 5. Pass to language model with inputs_embeds + position_ids
-                    # Note: vLLM's language_model.model may not accept
-                    # position_ids directly. We need to check if positions can be
-                    # overridden. For now, use inputs_embeds and let vLLM handle
-                    # positions
-                    hidden_states = self.language_model.model(
-                        input_ids=None,  # Use inputs_embeds instead
-                        positions=positions,  # vLLM may recalculate from attention_mask
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=final_embedding,
-                    )
-                    return hidden_states
-
-        # Fallback to standard vLLM flow if no multimodal or inputs_embeds provided
+        # MINIMAL PATCH: forward is simplified - merge is done in get_input_embeddings
+        # Just use standard vLLM flow (text-only model behavior)
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
