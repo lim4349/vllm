@@ -786,8 +786,19 @@ class OpenCUA_VisionTransformer(nn.Module):
         pos_ids_1d = (pos_ids_1d + frame_offsets).flatten()
         rotary_pos_emb_full = self.rotary_pos_emb_1d(total_tokens)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
+        if rotary_pos_emb.shape[0] != total_tokens:
+            raise RuntimeError(
+                f"rotary_pos_emb shape mismatch: expected {total_tokens}, "
+                f"got {rotary_pos_emb.shape[0]}. pos_ids_1d shape: {pos_ids_1d.shape}, "
+                f"rotary_pos_emb_full shape: {rotary_pos_emb_full.shape}"
+            )
+        if rotary_pos_emb.shape[0] % self.spatial_merge_unit != 0:
+            raise RuntimeError(
+                f"rotary_pos_emb.shape[0]={rotary_pos_emb.shape[0]} is not divisible "
+                f"by spatial_merge_unit={self.spatial_merge_unit}"
+            )
         rotary_pos_emb = rotary_pos_emb.reshape(
-            total_tokens // self.spatial_merge_unit,
+            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
             rotary_pos_emb.shape[1],
         )
