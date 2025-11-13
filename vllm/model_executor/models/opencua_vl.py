@@ -835,24 +835,20 @@ class OpenCUA_VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
-        # Fix division order: integer division is not associative
+        # Match Qwen2.5-VL division order exactly
+        # Integer division is not associative, so order matters
         vit_merger_window_size = (
-            self.window_size // self.patch_size
-        ) // self.spatial_merge_size
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
 
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
         index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
             grid_t, llm_grid_h, llm_grid_w
         )
-        # Modular padding: pad only when not divisible (prevents off-by-one errors)
-        # When divisible, remainder is 0, so padding is 0
-        pad_h = (
-            vit_merger_window_size - (llm_grid_h % vit_merger_window_size)
-        ) % vit_merger_window_size
-        pad_w = (
-            vit_merger_window_size - (llm_grid_w % vit_merger_window_size)
-        ) % vit_merger_window_size
+        # Match Qwen2.5-VL padding logic exactly
+        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
         num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
         num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
         index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
