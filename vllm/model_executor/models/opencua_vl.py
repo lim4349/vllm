@@ -851,12 +851,36 @@ class OpenCUA_VisionTransformer(nn.Module):
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
-        rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
-        #                            spatial_merge_unit, rotary_dim // 2]
+
+        # For 1D RoPE: generate position embeddings based on window reordering order
+        # After window reordering, tokens are in a specific order
+        # We assign sequential 1D positions (0, 1, 2, ...) to tokens in their
+        # window reordering order
+        llm_h = h // self.spatial_merge_size
+        llm_w = w // self.spatial_merge_size
+        total_llm_tokens = t * llm_h * llm_w
+
+        # Generate 1D RoPE for all positions after window reordering
+        # The window reordering order itself becomes the 1D position index
+        pos_ids_1d = torch.arange(total_llm_tokens)
+        required_size = total_llm_tokens
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
+
+        # Index into 1D RoPE using sequential positions
+        rotary_pos_emb_flat = rotary_pos_emb_full[pos_ids_1d]
+
+        # Reshape to match spatial_merge_unit grouping
+        rotary_pos_emb_thw = rotary_pos_emb_flat.reshape(
+            rotary_pos_emb_flat.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+
         # Apply window reordering (exactly like Qwen2.5-VL)
+        # This reorders position embeddings to match the window attention order
         rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
