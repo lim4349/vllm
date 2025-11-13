@@ -778,47 +778,14 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        # OpenCUA uses 1D RoPE but follows Qwen2.5-VL's structure
-        # Generate 2D position IDs from original patch grid (h, w)
-        # Then apply spatial merge permutation to match the merge order
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-
-        # Apply spatial merge permutation (same as Qwen2.5-VL)
-        # This reorders patches to match the spatial merge order
-        hpos_ids = (
-            hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
-        wpos_ids = (
-            wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
-
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_tokens = t * llm_h * llm_w
-        pos_ids_1d = torch.arange(llm_h * llm_w).unsqueeze(0).repeat(t, 1)
-        frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
-        pos_ids_1d = (pos_ids_1d + frame_offsets).flatten()
         rotary_pos_emb_full = self.rotary_pos_emb_1d(total_tokens)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
-        rotary_pos_emb = rotary_pos_emb.reshape(
-            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
+        rotary_pos_emb = rotary_pos_emb_full.reshape(
+            total_tokens // self.spatial_merge_unit,
             self.spatial_merge_unit,
-            rotary_pos_emb.shape[1],
+            rotary_pos_emb_full.shape[1],
         )
         return rotary_pos_emb
 
