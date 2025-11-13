@@ -2087,6 +2087,164 @@ class OpenCUA_VLForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
+    def _merge_input_ids_with_image_features(
+        self,
+        image_features: torch.Tensor,
+        feature_lengths: list[int],
+        inputs_embeds: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """
+        Merge image features into input embeddings, expanding image tokens.
+
+        This implementation follows HuggingFace's approach for OpenCUA:
+        - Each image token is expanded to feature_lengths tokens
+        - Text token positions are recalculated
+        - Final sequence length is expanded
+
+        Args:
+            image_features: Image features of shape
+                (num_image_tokens, embed_dim)
+            feature_lengths: Length of each image feature sequence
+            inputs_embeds: Input embeddings of shape
+                (batch_size, sequence_length, embed_dim)
+            input_ids: Input IDs of shape (batch_size, sequence_length)
+            attention_mask: Attention mask of shape
+                (batch_size, sequence_length)
+            labels: Labels of shape (batch_size, sequence_length), optional
+
+        Returns:
+            Tuple of (final_embedding, final_attention_mask,
+            final_labels, position_ids)
+        """
+        image_token_index: int = self.config.media_placeholder_token_id
+        pad_token_id: int = self.config.pad_token_id
+        ignore_index: int = getattr(self.config, "ignore_index", -100)
+
+        _, embed_dim = image_features.shape
+        batch_size, sequence_length = input_ids.shape
+
+        # Check if left padding (pad tokens at the start)
+        left_padding = not torch.sum(
+            input_ids[:, -1] == torch.tensor(pad_token_id, device=input_ids.device)
+        )
+
+        # 1. Create a mask to know where special image tokens are
+        _token_occupation_table = torch.ones_like(input_ids.flatten())
+        image_token_mask = input_ids.flatten() == image_token_index
+        _token_occupation_table[image_token_mask] = torch.tensor(
+            feature_lengths, dtype=torch.long, device=input_ids.device
+        )
+        _token_occupation_table = _token_occupation_table.reshape(input_ids.shape)
+
+        max_embed_dim = _token_occupation_table.sum(-1).max().item()
+        assert max_embed_dim >= sequence_length, (
+            f"The maximum embedding dimension ({max_embed_dim}) is less than "
+            f"the sequence length ({sequence_length})"
+        )
+
+        batch_indices, non_image_indices = torch.where(input_ids != image_token_index)
+
+        # 2. Compute the positions where text should be written
+        # Calculate new positions for text tokens in merged image-text sequence.
+        new_token_positions = torch.cumsum(_token_occupation_table, -1) - 1
+        nb_image_pad = max_embed_dim - 1 - new_token_positions[:, -1]
+
+        if left_padding:
+            new_token_positions += nb_image_pad[:, None]  # offset for left padding
+
+        text_to_overwrite = new_token_positions[batch_indices, non_image_indices]
+
+        # 3. Create the full embedding, already padded to the maximum position
+        final_embedding = torch.zeros(
+            batch_size,
+            max_embed_dim,
+            embed_dim,
+            dtype=inputs_embeds.dtype,
+            device=inputs_embeds.device,
+        )
+        final_attention_mask = torch.zeros(
+            batch_size,
+            max_embed_dim,
+            dtype=attention_mask.dtype,
+            device=inputs_embeds.device,
+        )
+        if labels is not None:
+            final_labels = torch.full(
+                (batch_size, max_embed_dim),
+                ignore_index,
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+        else:
+            final_labels = None
+
+        # In case the Vision model or the Language model has been offloaded
+        # to CPU, we need to manually set the corresponding tensors into
+        # their correct target device.
+        target_device = inputs_embeds.device
+        batch_indices, non_image_indices, text_to_overwrite = (
+            batch_indices.to(target_device),
+            non_image_indices.to(target_device),
+            text_to_overwrite.to(target_device),
+        )
+        attention_mask = attention_mask.to(target_device)
+
+        # 4. Fill the embeddings based on the mask.
+        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
+            batch_indices, non_image_indices
+        ]
+        final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[
+            batch_indices, non_image_indices
+        ]
+        if labels is not None:
+            final_labels[batch_indices, text_to_overwrite] = labels[
+                batch_indices, non_image_indices
+            ]
+
+        # 5. Fill the embeddings corresponding to the images.
+        # Anything that is not `text_positions` needs filling
+        image_to_overwrite = torch.full(
+            (batch_size, max_embed_dim),
+            True,
+            dtype=torch.bool,
+            device=inputs_embeds.device,
+        )
+        image_to_overwrite[batch_indices, text_to_overwrite] = False
+        image_to_overwrite &= (
+            image_to_overwrite.cumsum(-1) - 1 >= nb_image_pad[:, None].to(target_device)
+        )
+
+        num_image_tokens = image_to_overwrite.sum()
+        num_image_features = image_features.shape[:-1].numel()
+        if num_image_tokens != num_image_features:
+            raise ValueError(
+                f"The input provided to the model are wrong. "
+                f"The number of image tokens is {num_image_tokens} "
+                f"while the number of image features given to the model "
+                f"is {num_image_features}. "
+                "This prevents correct indexing and breaks batch generation."
+            )
+
+        final_embedding[image_to_overwrite] = image_features.contiguous().reshape(
+            -1, embed_dim
+        ).to(target_device)
+        final_attention_mask |= image_to_overwrite
+
+        position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_(
+            (final_attention_mask == 0), 1
+        )
+
+        # 6. Mask out the embedding at padding positions, as we later use the
+        # past_key_value value to determine the non-attended tokens.
+        batch_indices, pad_indices = torch.where(input_ids == pad_token_id)
+        indices_to_mask = new_token_positions[batch_indices, pad_indices]
+        final_embedding[batch_indices, indices_to_mask] = 0
+
+        return final_embedding, final_attention_mask, final_labels, position_ids
+
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -2095,7 +2253,7 @@ class OpenCUA_VLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        """Override to add debugging logs for multimodal embedding merging."""
+        """Override to use custom image feature merging logic."""
         logger = init_logger(__name__)
 
         if multimodal_embeddings is not None:
@@ -2121,13 +2279,43 @@ class OpenCUA_VLForConditionalGeneration(
         else:
             logger.info("OpenCUA get_input_embeddings: no is_multimodal mask")
 
-        # Call parent implementation
-        return super().get_input_embeddings(
+        # Get text embeddings first
+        inputs_embeds = self._get_text_embeddings(
             input_ids,
-            multimodal_embeddings=multimodal_embeddings,
+            self.get_language_model().get_input_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229."
+            )
+
+        # Flatten multimodal embeddings and compute feature lengths
+        from vllm.model_executor.models.utils import _flatten_embeddings
+
+        image_features_flat = _flatten_embeddings(multimodal_embeddings)
+        feature_lengths = [e.shape[0] for e in multimodal_embeddings]
+
+        # Use custom merging logic
+        # Note: vLLM doesn't pass attention_mask or labels here, so we create dummy ones
+        attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        final_embedding, _, _, _ = self._merge_input_ids_with_image_features(
+            image_features=image_features_flat,
+            feature_lengths=feature_lengths,
+            inputs_embeds=inputs_embeds,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=None,
+        )
+
+        return final_embedding
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         logger = init_logger(__name__)
