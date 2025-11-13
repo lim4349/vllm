@@ -778,41 +778,16 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        """
-        Generate 1D RoPE matching Qwen2.5-VL's spatial merge permutation order.
-
-        CRITICAL: Must apply the same spatial merge permutation as Qwen2.5-VL
-        before assigning 1D positions. Qwen2.5-VL applies:
-        - reshape(h//sm, sm, w//sm, sm) then permute(0, 2, 1, 3) then flatten()
-        - This reorders patches to match spatial merge grouping
-
-        For 1D RoPE, we assign sequential positions AFTER spatial merge permutation,
-        matching the order that hidden_states will be in after reshape.
-        """
-        # After spatial merge, we have llm_h * llm_w tokens per frame
-        # Assign sequential 1D positions in the order after spatial merge permutation
-        # This matches the order that hidden_states will be in after reshape
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
-        pos_ids_1d = torch.arange(llm_h * llm_w)
-
-        # Repeat for temporal dimension and add frame offsets
-        # Frame i gets positions [i*llm_h*llm_w, ..., (i+1)*llm_h*llm_w-1]
-        pos_ids_1d = pos_ids_1d.repeat(t)
+        pos_ids_1d_sequential = torch.arange(llm_h * llm_w)
+        pos_ids_1d_sequential = pos_ids_1d_sequential.repeat(t)
         frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
-        pos_ids_1d = pos_ids_1d.unsqueeze(0) + frame_offsets
-        pos_ids_1d = pos_ids_1d.flatten()
-
-        # Generate 1D RoPE for all positions
-        # Total positions after spatial merge: t * llm_h * llm_w
+        pos_ids_1d_sequential = pos_ids_1d_sequential.unsqueeze(0) + frame_offsets
+        pos_ids_1d_sequential = pos_ids_1d_sequential.flatten()
         required_size = t * llm_h * llm_w
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
-
-        # Index into 1D RoPE using sequential positions after spatial merge
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
-
-        # Reshape to match spatial_merge_unit grouping
-        # This matches the shape after patch_embed + reshape
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d_sequential]
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -821,8 +796,6 @@ class OpenCUA_VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
-        # Match Qwen2.5-VL division order exactly
-        # Integer division is not associative, so order matters
         vit_merger_window_size = (
             self.window_size // self.spatial_merge_size // self.patch_size
         )
@@ -862,20 +835,11 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
-        # Follow Qwen2.5-VL structure exactly, but use 1D RoPE instead of 2D M-RoPE
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
-
-        # Generate 1D RoPE (OpenCUA uses 1D instead of 2D M-RoPE)
-        # rotary_pos_emb_thw is grouped by spatial_merge_unit, matching window_index_thw
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-
-        # Apply window reordering (exactly like Qwen2.5-VL)
-        # rotary_pos_emb_thw is already grouped by spatial_merge_unit and in
-        # the same order as window_index_thw (LLM token units after spatial merge)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        window_index_groups = window_index_thw // self.spatial_merge_unit
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_groups, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
-
-        # cu_seqlens_thw should be in patch units (h * w per frame)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -989,7 +953,6 @@ class OpenCUA_VisionTransformer(nn.Module):
             device=hidden_states.device, non_blocking=True
         )
 
-        # Follow Qwen2.5-VL structure exactly
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
@@ -1016,13 +979,9 @@ class OpenCUA_VisionTransformer(nn.Module):
                 seqlens=seqlens_now,
             )
 
-        # For Qwen2.5-VL-3B, float16 will overflow at last block
-        # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # adapter
-        # Qwen2.5-VL style: merger doesn't need grid_thw
         hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
