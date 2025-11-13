@@ -742,56 +742,26 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        # OpenCUA uses 1D RoPE but follows Qwen2.5-VL's structure
-        # Generate 2D position IDs from original patch grid (h, w)
-        # Then apply spatial merge permutation to match the merge order
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        # OpenCUA uses 1D RoPE with sequential positions
+        # After spatial merge permutation, patches are reordered
+        # We need to use sequential indices (0, 1, 2, ...) for 1D RoPE
+        # Total patches after patch_embed (before spatial merge)
+        total_patches = t * h * w
 
-        # Apply spatial merge permutation (same as Qwen2.5-VL)
-        # This reorders patches to match the spatial merge order
-        # After this, patches are in the order they will be after spatial merge
-        hpos_ids = (
-            hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
-        wpos_ids = (
-            wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            .permute(0, 2, 1, 3)
-            .flatten()
-        )
+        # For 1D RoPE, use sequential positions: 0, 1, 2, ..., total_patches-1
+        # This matches the actual order of patches after spatial merge permutation
+        pos_ids_1d = torch.arange(total_patches)
 
-        # Stack 2D positions and repeat for temporal dimension
-        pos_ids_2d = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-
-        # Map 2D positions to 1D sequential positions for 1D RoPE
-        # Use row-major order: pos_1d = hpos * w + wpos
-        # This preserves spatial locality and matches the actual patch order
-        # After spatial merge permutation, hpos_ids and wpos_ids still represent
-        # original patch positions, but in the order they appear after merge
-        pos_ids_1d = pos_ids_2d[:, 0] * w + pos_ids_2d[:, 1]
-
-        # Generate 1D RoPE for all possible positions
-        # Maximum position is (h-1) * w + (w-1) = h * w - 1
-        max_pos_1d = h * w - 1
-        required_size = max_pos_1d + 1
+        # Generate 1D RoPE for all positions
+        required_size = total_patches
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
         # Index into 1D RoPE using sequential positions
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
 
         # Reshape to match spatial_merge_unit grouping
+        # After spatial merge, we have total_patches // spatial_merge_unit^2 tokens
+        # But rotary_pos_emb is still for total_patches, so we reshape accordingly
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -1142,7 +1112,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            
+
             # Load processors only if not cached
             if self._cached_image_processor is None:
                 # Force use_fast=False to ensure consistent preprocessing
@@ -1154,7 +1124,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 self._cached_video_processor = AutoVideoProcessor.from_pretrained(
                     model_path, use_fast=False, **image_processor_config
                 )
-            
+
             image_processor = self._cached_image_processor
             video_processor = self._cached_video_processor
 
@@ -1204,7 +1174,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
             from transformers import AutoImageProcessor, AutoVideoProcessor
 
             model_path = self.ctx.model_config.model
-            
+
             # Load processors only if not cached
             if self._cached_image_processor is None:
                 # Force use_fast=False to ensure consistent preprocessing
@@ -1216,7 +1186,7 @@ class OpenCUA_VLProcessingInfo(Qwen2VLProcessingInfo):
                 self._cached_video_processor = AutoVideoProcessor.from_pretrained(
                     model_path, use_fast=False, **image_processor_config
                 )
-            
+
             image_processor = self._cached_image_processor
             video_processor = self._cached_video_processor
 
@@ -1392,8 +1362,8 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
         if media_placeholder_id is not None:
             placeholder_count = prompt_ids.count(media_placeholder_id)
-            expected_count = (
-                len(mm_items.get("image", [])) + len(mm_items.get("video", []))
+            expected_count = len(mm_items.get("image", [])) + len(
+                mm_items.get("video", [])
             )
 
             if placeholder_count != expected_count:
