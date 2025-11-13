@@ -742,24 +742,20 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        # OpenCUA uses 1D RoPE with sequential positions
-        # After spatial merge, we have llm_h x llm_w grid
-        # Generate position IDs for LLM grid (after spatial merge)
-        llm_h = h // self.spatial_merge_size
-        llm_w = w // self.spatial_merge_size
-
-        # Generate 2D position IDs for LLM grid
-        # These represent positions in the merged space
-        hpos_ids = torch.arange(llm_h).unsqueeze(1).expand(-1, llm_w)
-        wpos_ids = torch.arange(llm_w).unsqueeze(0).expand(llm_h, -1)
+        # OpenCUA uses 1D RoPE but follows Qwen2.5-VL's structure
+        # Generate 2D position IDs from original patch grid (h, w)
+        # Then apply spatial merge permutation to match the merge order
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
 
         # Apply spatial merge permutation (same as Qwen2.5-VL)
         # This reorders patches to match the spatial merge order
+        # After this, patches are in the order they will be after spatial merge
         hpos_ids = (
             hpos_ids.reshape(
-                llm_h // self.spatial_merge_size,
+                h // self.spatial_merge_size,
                 self.spatial_merge_size,
-                llm_w // self.spatial_merge_size,
+                w // self.spatial_merge_size,
                 self.spatial_merge_size,
             )
             .permute(0, 2, 1, 3)
@@ -767,26 +763,28 @@ class OpenCUA_VisionTransformer(nn.Module):
         )
         wpos_ids = (
             wpos_ids.reshape(
-                llm_h // self.spatial_merge_size,
+                h // self.spatial_merge_size,
                 self.spatial_merge_size,
-                llm_w // self.spatial_merge_size,
+                w // self.spatial_merge_size,
                 self.spatial_merge_size,
             )
             .permute(0, 2, 1, 3)
             .flatten()
         )
 
-        # Repeat for temporal dimension
+        # Stack 2D positions and repeat for temporal dimension
         pos_ids_2d = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
 
         # Map 2D positions to 1D sequential positions for 1D RoPE
-        # Use row-major order: pos_1d = hpos * llm_w + wpos
-        # This preserves spatial locality better than max_size mapping
-        pos_ids_1d = pos_ids_2d[:, 0] * llm_w + pos_ids_2d[:, 1]
+        # Use row-major order: pos_1d = hpos * w + wpos
+        # This preserves spatial locality and matches the actual patch order
+        # After spatial merge permutation, hpos_ids and wpos_ids still represent
+        # original patch positions, but in the order they appear after merge
+        pos_ids_1d = pos_ids_2d[:, 0] * w + pos_ids_2d[:, 1]
 
         # Generate 1D RoPE for all possible positions
-        # Maximum position is (llm_h-1) * llm_w + (llm_w-1) = llm_h * llm_w - 1
-        max_pos_1d = llm_h * llm_w - 1
+        # Maximum position is (h-1) * w + (w-1) = h * w - 1
+        max_pos_1d = h * w - 1
         required_size = max_pos_1d + 1
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
