@@ -927,9 +927,8 @@ class OpenCUA_VisionTransformer(nn.Module):
             # Use 1D RoPE for sequential attention
             rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
 
-            # Reshape to match expected format: [S, 1, head_dim/2]
-            rotary_pos_emb_1d = rotary_pos_emb_1d.unsqueeze(1)
-
+            # rotary_pos_emb_1d shape: [total_patches, rotary_dim // 2]
+            # This matches the expected format for apply_rotary_pos_emb_vision
             rotary_pos_emb.append(rotary_pos_emb_1d)
             cu_seqlens.append(cu_seqlens_1d)
 
