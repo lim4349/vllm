@@ -53,7 +53,6 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
-    PromptReplacement,
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
@@ -1907,6 +1906,7 @@ class OpenCUA_VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, ...]:
         # Force output to file for debugging (stderr might be redirected)
         import os
+
         debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
         try:
             with open(debug_file, "a") as f:
@@ -1914,7 +1914,7 @@ class OpenCUA_VLForConditionalGeneration(
                 f.flush()
         except Exception:
             pass  # Ignore file write errors
-        
+
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
@@ -2250,9 +2250,9 @@ class OpenCUA_VLForConditionalGeneration(
             device=inputs_embeds.device,
         )
         image_to_overwrite[batch_indices, text_to_overwrite] = False
-        image_to_overwrite &= (
-            image_to_overwrite.cumsum(-1) - 1 >= nb_image_pad[:, None].to(target_device)
-        )
+        image_to_overwrite &= image_to_overwrite.cumsum(-1) - 1 >= nb_image_pad[
+            :, None
+        ].to(target_device)
 
         num_image_tokens = image_to_overwrite.sum()
         num_image_features = image_features.shape[:-1].numel()
@@ -2265,9 +2265,9 @@ class OpenCUA_VLForConditionalGeneration(
                 "This prevents correct indexing and breaks batch generation."
             )
 
-        final_embedding[image_to_overwrite] = image_features.contiguous().reshape(
-            -1, embed_dim
-        ).to(target_device)
+        final_embedding[image_to_overwrite] = (
+            image_features.contiguous().reshape(-1, embed_dim).to(target_device)
+        )
         final_attention_mask |= image_to_overwrite
 
         position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_(
@@ -2282,6 +2282,63 @@ class OpenCUA_VLForConditionalGeneration(
 
         return final_embedding, final_attention_mask, final_labels, position_ids
 
+    def _merge_multimodal_embeddings_hf_style(
+        self,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        is_multimodal: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        HF-style merge following OpenCUA official implementation.
+        Reference: https://huggingface.co/xlangai/OpenCUA-7B/blob/main/modeling_opencua.py
+
+        This expands each placeholder token to feature_lengths tokens,
+        following the same logic as HuggingFace's OpenCUA implementation.
+        """
+        from vllm.model_executor.models.utils import _flatten_embeddings
+
+        if len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        image_features_flat = _flatten_embeddings(multimodal_embeddings)
+        feature_lengths = [e.shape[0] for e in multimodal_embeddings]
+
+        batch_size, sequence_length = inputs_embeds.shape[:2]
+
+        # Create dummy input_ids with placeholder tokens at is_multimodal positions
+        # This is needed for _merge_input_ids_with_image_features to work correctly
+        image_token_id = self.config.media_placeholder_token_id
+        dummy_input_ids = torch.full(
+            (batch_size, sequence_length),
+            image_token_id,
+            dtype=torch.long,
+            device=inputs_embeds.device,
+        )
+
+        # Set non-multimodal positions to 0 (will be ignored)
+        dummy_input_ids[~is_multimodal] = 0
+
+        attention_mask = torch.ones(
+            batch_size, sequence_length, dtype=torch.bool, device=inputs_embeds.device
+        )
+
+        (
+            final_embedding,
+            _,
+            _,
+            position_ids,
+        ) = self._merge_input_ids_with_image_features(
+            image_features=image_features_flat,
+            feature_lengths=feature_lengths,
+            inputs_embeds=inputs_embeds,
+            input_ids=dummy_input_ids,
+            attention_mask=attention_mask,
+            labels=None,
+        )
+
+        self._cached_position_ids = position_ids
+        return final_embedding
+
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -2293,6 +2350,7 @@ class OpenCUA_VLForConditionalGeneration(
         """Override to use custom image feature merging logic."""
         # Force output to file for debugging (stderr might be redirected)
         import os
+
         debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
         try:
             with open(debug_file, "a") as f:
@@ -2302,9 +2360,7 @@ class OpenCUA_VLForConditionalGeneration(
                 mm_embeds_status = (
                     "present" if multimodal_embeddings is not None else "None"
                 )
-                is_mm_status = (
-                    "present" if is_multimodal is not None else "None"
-                )
+                is_mm_status = "present" if is_multimodal is not None else "None"
                 f.write(
                     f"[OpenCUA get_input_embeddings CALLED] "
                     f"input_ids shape: {input_ids_shape}, "
@@ -2314,7 +2370,7 @@ class OpenCUA_VLForConditionalGeneration(
                 f.flush()
         except Exception:
             pass  # Ignore file write errors
-        
+
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA get_input_embeddings: CALLED - "
@@ -2366,54 +2422,18 @@ class OpenCUA_VLForConditionalGeneration(
                 "https://github.com/vllm-project/vllm/pull/16229."
             )
 
-        # MINIMAL PATCH: Always use HF-style merge for debugging
-        # This ensures we use the exact same merge logic as HuggingFace
-        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-            logger.info(
-                "OpenCUA get_input_embeddings: Using HF-style merge (minimal patch)"
-            )
-            from vllm.model_executor.models.utils import _flatten_embeddings
-
-            image_features_flat = _flatten_embeddings(multimodal_embeddings)
-            feature_lengths = [e.shape[0] for e in multimodal_embeddings]
-
-            attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
-            (
-                final_embedding,
-                _,
-                _,
-                position_ids,
-            ) = self._merge_input_ids_with_image_features(
-                image_features=image_features_flat,
-                feature_lengths=feature_lengths,
-                inputs_embeds=inputs_embeds,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-            )
-            # Cache position_ids for use in forward
-            self._cached_position_ids = position_ids
-            logger.info(
-                "OpenCUA get_input_embeddings: HF merge complete - "
-                "final_embedding shape: %s, position_ids shape: %s, "
-                "position_ids min: %d, max: %d",
-                tuple(final_embedding.shape),
-                tuple(position_ids.shape) if position_ids is not None else None,
-                position_ids.min().item() if position_ids is not None else -1,
-                position_ids.max().item() if position_ids is not None else -1,
-            )
-            return final_embedding
-
-        # No multimodal inputs, return text embeddings only
-        logger.info(
-            "OpenCUA get_input_embeddings: No multimodal inputs, "
-            "returning text embeddings"
+        # Use HF-style merge following OpenCUA official implementation
+        # https://huggingface.co/xlangai/OpenCUA-7B/blob/main/modeling_opencua.py
+        return self._merge_multimodal_embeddings_hf_style(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
         )
-        return inputs_embeds
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         # Force output to file for debugging (stderr might be redirected)
         import os
+
         debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
         try:
             with open(debug_file, "a") as f:
@@ -2424,7 +2444,7 @@ class OpenCUA_VLForConditionalGeneration(
                 f.flush()
         except Exception:
             pass  # Ignore file write errors
-        
+
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA get_multimodal_embeddings: CALLED - kwargs keys: %s",
@@ -2486,12 +2506,13 @@ class OpenCUA_VLForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         """
         OpenCUA custom forward with HF-style merge.
-        
+
         MINIMAL PATCH: Merge is done in get_input_embeddings,
         forward just uses standard vLLM flow.
         """
         # Force output to file for debugging (stderr might be redirected)
         import os
+
         debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
         try:
             with open(debug_file, "a") as f:
@@ -2499,17 +2520,13 @@ class OpenCUA_VLForConditionalGeneration(
                     tuple(input_ids.shape) if input_ids is not None else None
                 )
                 inputs_embeds_shape = (
-                    tuple(inputs_embeds.shape)
-                    if inputs_embeds is not None
-                    else None
+                    tuple(inputs_embeds.shape) if inputs_embeds is not None else None
                 )
                 positions_shape = (
                     tuple(positions.shape) if positions is not None else None
                 )
                 cached_pos_status = (
-                    "present"
-                    if self._cached_position_ids is not None
-                    else "None"
+                    "present" if self._cached_position_ids is not None else "None"
                 )
                 f.write(
                     f"[OpenCUA forward CALLED] "
@@ -2521,7 +2538,7 @@ class OpenCUA_VLForConditionalGeneration(
                 f.flush()
         except Exception:
             pass  # Ignore file write errors
-        
+
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA forward: CALLED - "
@@ -2532,7 +2549,7 @@ class OpenCUA_VLForConditionalGeneration(
             tuple(positions.shape) if positions is not None else None,
             "present" if self._cached_position_ids is not None else "None",
         )
-        
+
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2545,13 +2562,13 @@ class OpenCUA_VLForConditionalGeneration(
                 tuple(self._cached_position_ids.shape),
                 tuple(positions.shape),
             )
-            
+
             # Convert cached position_ids to vLLM's flattened format
             # position_ids shape: (batch_size, seq_len)
             # vLLM expects positions: flattened (batch_size * seq_len,)
             batch_size, seq_len = inputs_embeds.shape[:2]
             cached_positions = self._cached_position_ids
-            
+
             # Ensure shape matches
             if (
                 cached_positions.shape[0] == batch_size
@@ -2559,7 +2576,7 @@ class OpenCUA_VLForConditionalGeneration(
             ):
                 # Flatten to match vLLM's expected format
                 positions_flat = cached_positions.flatten()
-                
+
                 logger.info(
                     "OpenCUA forward: Using HF position_ids - "
                     "flattened shape: %s, min: %d, max: %d",
@@ -2567,7 +2584,7 @@ class OpenCUA_VLForConditionalGeneration(
                     positions_flat.min().item(),
                     positions_flat.max().item(),
                 )
-                
+
                 # Use cached position_ids instead of vLLM's positions
                 hidden_states = self.language_model.model(
                     input_ids=None,  # Use inputs_embeds
@@ -2575,7 +2592,7 @@ class OpenCUA_VLForConditionalGeneration(
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
-                
+
                 # Clear cache after use
                 self._cached_position_ids = None
                 return hidden_states
