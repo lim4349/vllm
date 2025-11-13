@@ -778,29 +778,63 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        llm_h = h // self.spatial_merge_size
-        llm_w = w // self.spatial_merge_size
-        total_tokens = t * llm_h * llm_w
-        pos_ids_1d = torch.arange(llm_h * llm_w).unsqueeze(0).repeat(t, 1)
-        frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
-        pos_ids_1d = (pos_ids_1d + frame_offsets).flatten()
-        rotary_pos_emb_full = self.rotary_pos_emb_1d(total_tokens)
+        # OpenCUA uses 1D RoPE but follows Qwen2.5-VL's structure
+        # Generate 2D position IDs from original patch grid (h, w)
+        # Then apply spatial merge permutation to match the merge order
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+
+        # Apply spatial merge permutation (same as Qwen2.5-VL)
+        # This reorders patches to match the spatial merge order
+        hpos_ids = (
+            hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        wpos_ids = (
+            wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+
+        # For 1D RoPE: use sequential positions after spatial merge permutation
+        # The key insight: after spatial merge permutation, patches are reordered
+        # We assign sequential 1D positions (0, 1, 2, ...) to patches in their
+        # permutation order. This means the first patch after permutation gets
+        # position 0, the second gets position 1, etc.
+        total_patches = h * w
+
+        # Sequential positions: 0, 1, 2, ..., total_patches-1
+        # This matches the order after spatial merge permutation
+        pos_ids_1d_per_frame = torch.arange(total_patches)
+
+        # Repeat for temporal dimension
+        pos_ids_1d = pos_ids_1d_per_frame.repeat(t)
+
+        # Generate 1D RoPE for all positions
+        # We need enough positions to cover all possible indices
+        required_size = total_patches
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
+
+        # Index into 1D RoPE using sequential positions
+        # Each patch gets a position embedding based on its order after permutation
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
-        if rotary_pos_emb.shape[0] != total_tokens:
-            raise RuntimeError(
-                f"rotary_pos_emb shape mismatch: expected {total_tokens}, "
-                f"got {rotary_pos_emb.shape[0]}. pos_ids_1d shape: {pos_ids_1d.shape}, "
-                f"rotary_pos_emb_full shape: {rotary_pos_emb_full.shape}"
-            )
-        if rotary_pos_emb.shape[0] % self.spatial_merge_unit != 0:
-            raise RuntimeError(
-                f"rotary_pos_emb.shape[0]={rotary_pos_emb.shape[0]} is not divisible "
-                f"by spatial_merge_unit={self.spatial_merge_unit}"
-            )
+
+        # Reshape to match spatial_merge_unit grouping
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
-            rotary_pos_emb.shape[1],
+            -1,
         )
         return rotary_pos_emb
 
