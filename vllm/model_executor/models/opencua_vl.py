@@ -878,8 +878,12 @@ class OpenCUA_VisionTransformer(nn.Module):
         # Reshape to match spatial_merge_unit grouping
         # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
         #                            spatial_merge_unit, rotary_dim // 2]
+        # Note: total_llm_tokens should be divisible by spatial_merge_unit
+        # (llm_h and llm_w are already divided by spatial_merge_size, so
+        #  total_llm_tokens = t * llm_h * llm_w is divisible by spatial_merge_unit)
+        num_groups = total_llm_tokens // self.spatial_merge_unit
         rotary_pos_emb_thw = rotary_pos_emb_flat.reshape(
-            rotary_pos_emb_flat.shape[0] // self.spatial_merge_unit,
+            num_groups,
             self.spatial_merge_unit,
             -1,
         )
