@@ -850,11 +850,54 @@ class OpenCUA_VisionTransformer(nn.Module):
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
-        # Use rotary_pos_emb_thw which already implements 1D RoPE
-        # (same structure as Qwen2.5-VL, but with 1D RoPE instead of M-RoPE)
-        rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+
+        # For 1D RoPE: generate sequential 1D RoPE based on window reordering order
+        # We need to assign 1D position i to the token at position i after reordering
+        llm_h = h // self.spatial_merge_size
+        llm_w = w // self.spatial_merge_size
+        total_llm_tokens = t * llm_h * llm_w
+
+        # Generate sequential 1D RoPE for all positions
+        # This will be assigned based on window reordering order
+        required_size = total_llm_tokens
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
+
+        # Reshape to match spatial_merge_unit grouping
+        # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
+        #                            spatial_merge_unit, rotary_dim // 2]
+        num_groups = total_llm_tokens // self.spatial_merge_unit
+        remainder = total_llm_tokens % self.spatial_merge_unit
+
+        if remainder == 0:
+            rotary_pos_emb_thw = rotary_pos_emb_full.reshape(
+                num_groups,
+                self.spatial_merge_unit,
+                -1,
+            )
+        else:
+            # Pad to make it divisible
+            pad_size = self.spatial_merge_unit - remainder
+            padding = rotary_pos_emb_full[-1:].repeat(pad_size, 1)
+            rotary_pos_emb_flat_padded = torch.cat(
+                [rotary_pos_emb_full, padding], dim=0
+            )
+            rotary_pos_emb_thw = rotary_pos_emb_flat_padded.reshape(
+                num_groups + 1,
+                self.spatial_merge_unit,
+                -1,
+            )
+
+        # Apply window reordering (exactly like Qwen2.5-VL)
+        # window_index_thw is in LLM token units, but rotary_pos_emb_thw is
+        # grouped by spatial_merge_unit, so we need to divide by spatial_merge_unit
+        window_index_grouped = window_index_thw // self.spatial_merge_unit
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_grouped, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+
+        # Remove padding if needed
+        if remainder != 0:
+            rotary_pos_emb_thw = rotary_pos_emb_thw[:total_llm_tokens]
+
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
