@@ -788,9 +788,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
         rotary_pos_emb = rotary_pos_emb.reshape(
-            t * llm_h * llm_w // self.spatial_merge_unit,
+            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
-            -1,
+            rotary_pos_emb.shape[1],
         )
         return rotary_pos_emb
 
