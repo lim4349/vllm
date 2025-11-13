@@ -877,6 +877,8 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_flat = rotary_pos_emb_full[pos_ids_1d_mapped]
 
         # Reshape to match spatial_merge_unit grouping
+        # rotary_pos_emb_thw shape: [total_llm_tokens // spatial_merge_unit,
+        #                            spatial_merge_unit, rotary_dim // 2]
         rotary_pos_emb_thw = rotary_pos_emb_flat.reshape(
             rotary_pos_emb_flat.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -884,8 +886,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         )
 
         # Apply window reordering (exactly like Qwen2.5-VL)
-        # This reorders position embeddings to match the window attention order
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        # window_index_thw is in LLM token units, but rotary_pos_emb_thw is
+        # grouped by spatial_merge_unit, so we need to divide by spatial_merge_unit
+        window_index_grouped = window_index_thw // self.spatial_merge_unit
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_grouped, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
 
         cu_seqlens_thw = torch.repeat_interleave(
