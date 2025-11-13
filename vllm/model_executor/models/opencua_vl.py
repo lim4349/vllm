@@ -1547,14 +1547,17 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "video": media_placeholder_id,
         }
 
+        merge_length = image_processor.merge_size**2
+
         def get_replacement_opencua(item_idx: int, modality: str):
-            # CRITICAL FIX: Prompt text should have only 1 placeholder token,
-            # not num_tokens. The PlaceholderRange.length is automatically set
-            # from the multimodal embeddings count returned by
-            # get_multimodal_embeddings. We return only 1 placeholder here to
-            # ensure the prompt text has exactly 1 placeholder, matching the
-            # expected behavior.
-            return [placeholder[modality]]
+            # OpenCUA follows Qwen2VL's approach: return num_tokens placeholders
+            # The PlaceholderRange.length is set from the actual token count in prompt
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+
+            num_tokens = int(grid_thw.prod()) // merge_length
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
