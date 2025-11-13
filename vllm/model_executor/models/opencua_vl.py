@@ -781,7 +781,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_tokens = t * llm_h * llm_w
-        rotary_pos_emb_full = self.rotary_pos_emb_1d(total_tokens)
+        # OpenCUA uses 1D RoPE: generate sequential position embeddings
+        # rotary_pos_emb.forward(seqlen) returns [seqlen, dim] where dim = head_dim // 2
+        rotary_pos_emb_full = self.rotary_pos_emb(total_tokens)
+        # Reshape to [total_tokens // spatial_merge_unit, spatial_merge_unit, dim]
         rotary_pos_emb = rotary_pos_emb_full.reshape(
             total_tokens // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -835,13 +838,13 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
-        # Flatten spatial_merge_unit dimension before window reordering
+        # Apply window reordering first (exactly like Qwen2.5-VL)
         # rotary_pos_emb_thw shape: [total_tokens // spatial_merge_unit,
         #                            spatial_merge_unit, rotary_dim]
-        # Flatten to: [total_tokens, rotary_dim] for indexing
+        # window_index_thw shape: [total_tokens // spatial_merge_unit]
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        # Then flatten spatial_merge_unit dimension
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
-        # Apply window reordering (exactly like Qwen2.5-VL)
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw]
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
