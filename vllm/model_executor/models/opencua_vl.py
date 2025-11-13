@@ -1905,6 +1905,14 @@ class OpenCUA_VLForConditionalGeneration(
     def _process_image_input(
         self, image_input: OpenCUA_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
+        # Force output for debugging
+        import sys
+        print(
+            "[OpenCUA _process_image_input CALLED]",
+            file=sys.stderr,
+            flush=True,
+        )
+        
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
