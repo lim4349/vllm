@@ -1994,9 +1994,53 @@ class OpenCUA_VLForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        """Override to add debugging logs for multimodal embedding merging."""
+        logger = init_logger(__name__)
+
+        if multimodal_embeddings is not None:
+            logger.info(
+                "OpenCUA get_input_embeddings: multimodal_embeddings - "
+                "num_items=%d, total_tokens=%d",
+                len(multimodal_embeddings),
+                sum(e.shape[0] for e in multimodal_embeddings)
+                if multimodal_embeddings
+                else 0,
+            )
+        else:
+            logger.info("OpenCUA get_input_embeddings: no multimodal_embeddings")
+
+        if is_multimodal is not None:
+            logger.info(
+                "OpenCUA get_input_embeddings: is_multimodal - "
+                "shape=%s, num_true=%d, num_false=%d",
+                tuple(is_multimodal.shape),
+                is_multimodal.sum().item(),
+                (~is_multimodal).sum().item(),
+            )
+        else:
+            logger.info("OpenCUA get_input_embeddings: no is_multimodal mask")
+
+        # Call parent implementation
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+        logger = init_logger(__name__)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
+            logger.warning("OpenCUA get_multimodal_embeddings: no multimodal inputs")
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -2010,11 +2054,34 @@ class OpenCUA_VLForConditionalGeneration(
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
                 # Ensure tuple format for consistency with other models
-                multimodal_embeddings += tuple(vision_embeddings)
+                vision_embeddings_tuple = tuple(vision_embeddings)
+                logger.info(
+                    "OpenCUA get_multimodal_embeddings: image embeddings - "
+                    "num_items=%d, shapes=%s",
+                    len(vision_embeddings_tuple),
+                    [tuple(e.shape) for e in vision_embeddings_tuple],
+                )
+                multimodal_embeddings += vision_embeddings_tuple
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 # Ensure tuple format for consistency with other models
-                multimodal_embeddings += tuple(video_embeddings)
+                video_embeddings_tuple = tuple(video_embeddings)
+                logger.info(
+                    "OpenCUA get_multimodal_embeddings: video embeddings - "
+                    "num_items=%d, shapes=%s",
+                    len(video_embeddings_tuple),
+                    [tuple(e.shape) for e in video_embeddings_tuple],
+                )
+                multimodal_embeddings += video_embeddings_tuple
+
+        logger.info(
+            "OpenCUA get_multimodal_embeddings: total embeddings - "
+            "num_items=%d, total_tokens=%d",
+            len(multimodal_embeddings),
+            sum(e.shape[0] for e in multimodal_embeddings)
+            if multimodal_embeddings
+            else 0,
+        )
         return multimodal_embeddings
 
     def forward(
