@@ -1378,6 +1378,37 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         """Override to add guard log for placeholder count after tokenization."""
         logger = init_logger(__name__)
 
+        # CRITICAL DEBUG: Log input state before processing
+        num_images = len(mm_items.get("image", []))
+        num_videos = len(mm_items.get("video", []))
+        logger.info(
+            "OpenCUA DEBUG _apply_hf_processor_text_mm - "
+            "mm_items: images=%d, videos=%d, prompt_text length=%d, "
+            "prompt_text preview: %s",
+            num_images,
+            num_videos,
+            len(prompt_text),
+            prompt_text[:200] if prompt_text else "EMPTY",
+        )
+
+        # Check if prompt_text contains media_placeholder
+        if prompt_text:
+            has_placeholder = "<|media_placeholder|>" in prompt_text
+            logger.info(
+                "OpenCUA DEBUG - prompt_text contains '<|media_placeholder|>': %s",
+                has_placeholder,
+            )
+            if not has_placeholder and (num_images > 0 or num_videos > 0):
+                logger.error(
+                    "OpenCUA CRITICAL ERROR - prompt_text does NOT contain "
+                    "<|media_placeholder|> but mm_items has %d images and %d videos! "
+                    "This means chat_template did not insert the placeholder token. "
+                    "prompt_text: %s",
+                    num_images,
+                    num_videos,
+                    prompt_text[:500],
+                )
+
         # Call parent method to perform actual processing
         prompt_ids, processed_data, is_update_applied = (
             super()._apply_hf_processor_text_mm(
@@ -1399,20 +1430,20 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
         if media_placeholder_id is not None:
             placeholder_count = prompt_ids.count(media_placeholder_id)
-            expected_count = len(mm_items.get("image", [])) + len(
-                mm_items.get("video", [])
-            )
+            expected_count = num_images + num_videos
 
             if placeholder_count != expected_count:
                 logger.error(
                     "OpenCUA GUARD LOG - placeholder count mismatch after "
                     "tokenization (BEFORE replacement): found %d placeholders, "
                     "expected %d (images: %d, videos: %d). Input prompt text "
-                    "should have exactly 1 placeholder per image/video.",
+                    "should have exactly 1 placeholder per image/video. "
+                    "prompt_text: %s",
                     placeholder_count,
                     expected_count,
-                    len(mm_items.get("image", [])),
-                    len(mm_items.get("video", [])),
+                    num_images,
+                    num_videos,
+                    prompt_text[:500] if prompt_text else "EMPTY",
                 )
             else:
                 logger.info(
@@ -1423,6 +1454,12 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                     placeholder_count,
                     expected_count,
                 )
+        else:
+            logger.error(
+                "OpenCUA CRITICAL ERROR - '<|media_placeholder|>' token not found "
+                "in tokenizer vocab! Available tokens sample: %s",
+                list(vocab.keys())[:20],
+            )
 
         return prompt_ids, processed_data, is_update_applied
 
