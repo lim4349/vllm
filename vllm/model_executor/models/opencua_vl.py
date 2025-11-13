@@ -2299,6 +2299,7 @@ class OpenCUA_VLForConditionalGeneration(
         inputs_embeds: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings,
         is_multimodal: torch.Tensor,
+        input_ids: torch.Tensor,
     ) -> torch.Tensor:
         """
         HF-style merge following OpenCUA official implementation.
@@ -2316,19 +2317,33 @@ class OpenCUA_VLForConditionalGeneration(
         feature_lengths = [e.shape[0] for e in multimodal_embeddings]
 
         batch_size, sequence_length = inputs_embeds.shape[:2]
-
-        # Create dummy input_ids with placeholder tokens at is_multimodal positions
-        # This is needed for _merge_input_ids_with_image_features to work correctly
         image_token_id = self.config.media_placeholder_token_id
-        dummy_input_ids = torch.full(
-            (batch_size, sequence_length),
-            image_token_id,
-            dtype=torch.long,
-            device=inputs_embeds.device,
-        )
+        num_expected_placeholders = len(feature_lengths)
 
-        # Set non-multimodal positions to 0 (will be ignored)
-        dummy_input_ids[~is_multimodal] = 0
+        # Check if input_ids already has expanded placeholders
+        image_token_mask = input_ids == image_token_id
+        num_placeholders_in_input = image_token_mask.sum().item()
+
+        if num_placeholders_in_input > num_expected_placeholders:
+            # Placeholders are already expanded - compress to original (1 per image)
+            # Find first occurrence of each placeholder group using is_multimodal
+            compressed_input_ids = torch.zeros_like(input_ids)
+            for batch_idx in range(batch_size):
+                batch_is_multimodal = is_multimodal[batch_idx]
+                multimodal_indices = torch.where(batch_is_multimodal)[0]
+                if len(multimodal_indices) > 0:
+                    # Find group boundaries: where consecutive multimodal tokens start
+                    group_starts = [multimodal_indices[0].item()]
+                    for i in range(1, len(multimodal_indices)):
+                        if multimodal_indices[i] - multimodal_indices[i - 1] > 1:
+                            group_starts.append(multimodal_indices[i].item())
+                    # Take first num_expected_placeholders group starts
+                    keep_positions = group_starts[:num_expected_placeholders]
+                    for pos in keep_positions:
+                        compressed_input_ids[batch_idx, pos] = image_token_id
+            input_ids_for_merge = compressed_input_ids
+        else:
+            input_ids_for_merge = input_ids
 
         attention_mask = torch.ones(
             batch_size, sequence_length, dtype=torch.bool, device=inputs_embeds.device
@@ -2343,7 +2358,7 @@ class OpenCUA_VLForConditionalGeneration(
             image_features=image_features_flat,
             feature_lengths=feature_lengths,
             inputs_embeds=inputs_embeds,
-            input_ids=dummy_input_ids,
+            input_ids=input_ids_for_merge,
             attention_mask=attention_mask,
             labels=None,
         )
@@ -2440,6 +2455,7 @@ class OpenCUA_VLForConditionalGeneration(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
+            input_ids=input_ids,
         )
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
