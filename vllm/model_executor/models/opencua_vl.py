@@ -779,49 +779,40 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     def rotary_pos_emb_thw(self, t, h, w):
         """
-        Generate 1D RoPE for patches in (t, h, w) scan order.
+        Generate 1D RoPE matching Qwen2.5-VL's spatial merge permutation order.
 
-        CRITICAL: Position assignment MUST match patch_embed input order.
-        - HF processor outputs patches in (t, h, w) scan order:
-          * t dimension: slowest (outermost loop)
-          * h dimension: middle
-          * w dimension: fastest (innermost loop)
-        - patch_embed processes patches sequentially in this order
-        - RoPE assigns sequential 1D positions (0, 1, 2, ...) matching this order
+        CRITICAL: Must apply the same spatial merge permutation as Qwen2.5-VL
+        before assigning 1D positions. Qwen2.5-VL applies:
+        - reshape(h//sm, sm, w//sm, sm) then permute(0, 2, 1, 3) then flatten()
+        - This reorders patches to match spatial merge grouping
 
-        For 1D RoPE, use sequential positions across ALL frames:
-        - Frame 0: positions [0, 1, 2, ..., h*w-1]
-        - Frame 1: positions [h*w, h*w+1, ..., 2*h*w-1]
-        - ...
-        - Frame t-1: positions [(t-1)*h*w, ..., t*h*w-1]
-
-        This matches the sequential processing order from HF processor.
-        Total positions: [0, 1, 2, ..., t*h*w-1]
-
-        After spatial merge permutation and window reordering, positions are
-        reordered but the underlying sequential mapping remains consistent.
+        For 1D RoPE, we assign sequential positions AFTER spatial merge permutation,
+        matching the order that hidden_states will be in after reshape.
         """
-        total_patches = h * w
+        # After spatial merge, we have llm_h * llm_w tokens per frame
+        # Assign sequential 1D positions in the order after spatial merge permutation
+        # This matches the order that hidden_states will be in after reshape
+        llm_h = h // self.spatial_merge_size
+        llm_w = w // self.spatial_merge_size
+        pos_ids_1d = torch.arange(llm_h * llm_w)
 
-        # For 1D RoPE: use sequential positions across ALL frames
-        # This matches the patch order from HF processor: (t, h, w) scan
-        # Frame i gets positions [i*h*w, i*h*w+1, ..., (i+1)*h*w-1]
-        # Total positions: [0, 1, 2, ..., t*h*w-1]
-        pos_ids_1d = torch.arange(t * total_patches)
+        # Repeat for temporal dimension and add frame offsets
+        # Frame i gets positions [i*llm_h*llm_w, ..., (i+1)*llm_h*llm_w-1]
+        pos_ids_1d = pos_ids_1d.repeat(t)
+        frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
+        pos_ids_1d = pos_ids_1d.unsqueeze(0) + frame_offsets
+        pos_ids_1d = pos_ids_1d.flatten()
 
         # Generate 1D RoPE for all positions
-        # We need enough positions to cover all frames
-        required_size = t * total_patches
+        # Total positions after spatial merge: t * llm_h * llm_w
+        required_size = t * llm_h * llm_w
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
-        # Index into 1D RoPE using sequential positions
-        # Each patch gets a position embedding based on its sequential order
+        # Index into 1D RoPE using sequential positions after spatial merge
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
 
         # Reshape to match spatial_merge_unit grouping
-        # This groups patches for spatial merge (spatial_merge_size^2 patches per group)
-        # After reshape, rotary_pos_emb is in the same order as hidden_states after
-        # patch_embed and reshape, so they can be reordered together with window_index
+        # This matches the shape after patch_embed + reshape
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
