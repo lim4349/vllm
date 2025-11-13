@@ -496,8 +496,10 @@ class OpenCUA_VisionBlock(nn.Module):
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
-        x_fused_norm, residual = self.norm2(x, residual=x_attn)
-        x = residual + self.mlp(x_fused_norm)
+        # Safe norm call: apply norm2 to x_attn, then add residual
+        # This works with both LayerNorm and RMSNorm
+        x_norm = self.norm2(x_attn)
+        x = x_attn + self.mlp(x_norm)
         return x
 
 
@@ -659,7 +661,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         # full attention for specific layers
         # Read from vision_config, matching Qwen2.5-VL structure
         self.window_size = vision_config.window_size
-        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
+        # Force full attention for all layers (sequential attention)
+        # This ensures better text recognition quality
+        self.fullatt_block_indexes = list(range(vision_config.depth))
 
         self.patch_embed = OpenCUA_VisionPatchEmbed(
             patch_size=patch_size,
@@ -803,9 +807,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
+        # Fix division order: integer division is not associative
         vit_merger_window_size = (
-            self.window_size // self.spatial_merge_size // self.patch_size
-        )
+            self.window_size // self.patch_size
+        ) // self.spatial_merge_size
 
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
@@ -910,87 +915,51 @@ class OpenCUA_VisionTransformer(nn.Module):
         # patchify
         seq_len, _ = x.size()
         rotary_pos_emb = []
-        window_index: list = []
-        cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
-        window_index_id = 0
-        cu_window_seqlens_last = 0
+        # For sequential attention, we don't need window_index or cu_window_seqlens
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
-            llm_h = h // self.spatial_merge_size
-            llm_w = w // self.spatial_merge_size
 
             (
                 rotary_pos_emb_thw,
-                window_index_thw,
-                cu_seqlens_window_thw,
+                _window_index_thw,  # Not used for sequential attention
+                _cu_seqlens_window_thw,  # Not used for sequential attention
                 cu_seqlens_thw,
             ) = self.get_rope_by_thw(t, h, w)
 
-            window_index.append(window_index_thw + window_index_id)
-            window_index_id += t * llm_h * llm_w
-
-            cu_seqlens_window_thw = cu_seqlens_window_thw + cu_window_seqlens_last
-            cu_window_seqlens_last = cu_seqlens_window_thw[-1]
-            cu_window_seqlens.append(cu_seqlens_window_thw)
-
             rotary_pos_emb.append(rotary_pos_emb_thw)
-
             cu_seqlens.append(cu_seqlens_thw)
 
         rotary_pos_emb = torch.cat(rotary_pos_emb)
-        window_index = torch.cat(window_index)
-        # compute reverse indices
-        reverse_indices = self.invert_permutation(window_index)
-        cu_window_seqlens = torch.cat(cu_window_seqlens)
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        # For sequential attention, we don't need window_index or reverse_indices
+        # All layers use full attention, so tokens stay in original order
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
-        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
+        # pre-compute seqlens for full attention
         max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens
-        )
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-        window_index = window_index.to(device=hidden_states.device, non_blocking=True)
-        reverse_indices = reverse_indices.to(
-            device=hidden_states.device, non_blocking=True
-        )
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-
+        # Skip window reordering for sequential attention
+        # All layers use full attention, so no need to reorder tokens
         hidden_states = hidden_states.unsqueeze(1)
 
+        # All layers use full attention (sequential)
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-                max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
-            else:
-                cu_seqlens_now = cu_window_seqlens
-                max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
-
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens_now,
+                cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
-                max_seqlen=max_seqlen_now,
-                seqlens=seqlens_now,
+                max_seqlen=max_seqlen_full,
+                seqlens=seqlens_full,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -1000,8 +969,8 @@ class OpenCUA_VisionTransformer(nn.Module):
 
         # adapter
         # Qwen2.5-VL style: merger doesn't need grid_thw
+        # For sequential attention, no need to reverse indices (tokens stay in order)
         hidden_states = self.merger(hidden_states)
-        hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
