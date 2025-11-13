@@ -1445,7 +1445,10 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         )
 
         # GUARD LOG: Check placeholder count after tokenization
-        # This should be exactly 1 per image/video, not num_tokens
+        # NOTE: This is checked BEFORE prompt replacement, so it should be
+        # exactly 1 per image/video in the INPUT prompt text.
+        # After _maybe_apply_prompt_updates, the placeholder will be expanded
+        # to num_tokens (3128 in this case) by get_replacement_opencua.
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         media_placeholder_id = vocab.get("<|media_placeholder|>", None)
@@ -1459,9 +1462,8 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             if placeholder_count != expected_count:
                 logger.error(
                     "OpenCUA GUARD LOG - placeholder count mismatch after "
-                    "tokenization: found %d placeholders, expected %d "
-                    "(images: %d, videos: %d). This indicates premature "
-                    "expansion of placeholders in prompt text. Prompt text "
+                    "tokenization (BEFORE replacement): found %d placeholders, "
+                    "expected %d (images: %d, videos: %d). Input prompt text "
                     "should have exactly 1 placeholder per image/video.",
                     placeholder_count,
                     expected_count,
@@ -1471,7 +1473,9 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             else:
                 logger.info(
                     "OpenCUA GUARD LOG - placeholder count correct after "
-                    "tokenization: %d placeholders (expected %d)",
+                    "tokenization (BEFORE replacement): %d placeholders "
+                    "(expected %d). After replacement, each will expand to "
+                    "num_tokens placeholders.",
                     placeholder_count,
                     expected_count,
                 )
