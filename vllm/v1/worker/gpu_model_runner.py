@@ -2120,6 +2120,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         IntermediateTensors | None,
         dict[str, Any],
     ]:
+        # DEBUG: Log entry to _preprocess
+        import os
+        debug_file = os.environ.get("VLLM_DEBUG_FILE", "/tmp/opencua_debug.log")
+        try:
+            with open(debug_file, "a") as f:
+                f.write(
+                    f"[GPUModelRunner._preprocess] ENTRY - "
+                    f"num_input_tokens={num_input_tokens}, "
+                    f"model_type={type(self.model).__name__}\n"
+                )
+                f.flush()
+        except Exception:
+            pass
+        
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
 
@@ -2226,14 +2240,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
                 model_kwargs = self._init_model_kwargs(num_input_tokens)
                 input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids.gpu[:num_input_tokens]
-            inputs_embeds = None
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            else:
+                # For text-only models, we use token ids as input.
+                # While it is possible to use embeddings as input just like the
+                # multimodal models, it is not desirable for performance since
+                # then the embedding layer is not included in the CUDA graph.
+                input_ids = self.input_ids.gpu[:num_input_tokens]
+                inputs_embeds = None
+                model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         else:
