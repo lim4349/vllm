@@ -65,7 +65,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMRoPE,
+    # MINIMAL PATCH: Removed SupportsMRoPE - OpenCUA uses 1D RoPE
     SupportsMultiModal,
     SupportsMultiModalPruning,
     SupportsPP,
@@ -1595,7 +1595,9 @@ class OpenCUA_VLForConditionalGeneration(
     SupportsQuant,
     SupportsEagle3,
     SupportsMultiModalPruning,
-    SupportsMRoPE,
+    # MINIMAL PATCH: Removed SupportsMRoPE - OpenCUA uses 1D RoPE, not MRoPE
+    # This prevents vLLM from calling get_mrope_input_positions and overriding
+    # our HF-style position_ids
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -2422,8 +2424,63 @@ class OpenCUA_VLForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # MINIMAL PATCH: forward is simplified - merge is done in get_input_embeddings
-        # Just use standard vLLM flow (text-only model behavior)
+        # MINIMAL PATCH: Use cached position_ids from HF merge if available
+        # This ensures we use the exact same position_ids as HuggingFace
+        if self._cached_position_ids is not None and inputs_embeds is not None:
+            logger = init_logger(__name__)
+            logger.info(
+                "OpenCUA forward: Overriding positions with cached position_ids - "
+                "cached shape: %s, original positions shape: %s",
+                tuple(self._cached_position_ids.shape),
+                tuple(positions.shape),
+            )
+            
+            # Convert cached position_ids to vLLM's flattened format
+            # position_ids shape: (batch_size, seq_len)
+            # vLLM expects positions: flattened (batch_size * seq_len,)
+            batch_size, seq_len = inputs_embeds.shape[:2]
+            cached_positions = self._cached_position_ids
+            
+            # Ensure shape matches
+            if (
+                cached_positions.shape[0] == batch_size
+                and cached_positions.shape[1] == seq_len
+            ):
+                # Flatten to match vLLM's expected format
+                positions_flat = cached_positions.flatten()
+                
+                logger.info(
+                    "OpenCUA forward: Using HF position_ids - "
+                    "flattened shape: %s, min: %d, max: %d",
+                    tuple(positions_flat.shape),
+                    positions_flat.min().item(),
+                    positions_flat.max().item(),
+                )
+                
+                # Use cached position_ids instead of vLLM's positions
+                hidden_states = self.language_model.model(
+                    input_ids=None,  # Use inputs_embeds
+                    positions=positions_flat,  # Use HF position_ids
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+                
+                # Clear cache after use
+                self._cached_position_ids = None
+                return hidden_states
+            else:
+                logger = init_logger(__name__)
+                logger.warning(
+                    "OpenCUA forward: Cached position_ids shape mismatch - "
+                    "cached: %s, expected: (%d, %d), using default positions",
+                    tuple(cached_positions.shape),
+                    batch_size,
+                    seq_len,
+                )
+                # Clear invalid cache and fall through to default
+                self._cached_position_ids = None
+
+        # Fallback to standard vLLM flow
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
