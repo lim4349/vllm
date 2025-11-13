@@ -1340,10 +1340,27 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        # Log processed image dimensions after preprocessing
+        # Log processed image dimensions after preprocessing (HF format)
+        if "pixel_values" in result:
+            pixel_values = result["pixel_values"]
+            if isinstance(pixel_values, torch.Tensor):
+                logger.info(
+                    "[vLLM] pixel_values type = %s",
+                    type(pixel_values).__name__,
+                )
+                logger.info(
+                    "[vLLM] pixel_values shape = %s",
+                    str(tuple(pixel_values.shape)),
+                )
+
         if "image_grid_thw" in result:
             image_grid_thw = result["image_grid_thw"]
             if isinstance(image_grid_thw, torch.Tensor):
+                logger.info(
+                    "[vLLM] image_grid_thw = %s (shape: %s)",
+                    image_grid_thw,
+                    str(tuple(image_grid_thw.shape)),
+                )
                 grid_thw_list = image_grid_thw.tolist()
                 patch_size = getattr(
                     self.info.get_hf_config().vision_config, "patch_size", 14
@@ -1353,17 +1370,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                     processed_width = w * patch_size
                     processed_pixels = processed_height * processed_width
                     logger.info(
-                        "OpenCUA preprocess output - image[%d]: "
-                        "grid_thw=[%d, %d, %d], processed_size=%dx%d "
-                        "(%d pixels), patch_size=%d",
-                        idx,
+                        "[vLLM] t=%d, h=%d, w=%d, processed_size = %dx%d (%d pixels)",
                         t,
                         h,
                         w,
                         processed_width,
                         processed_height,
                         processed_pixels,
-                        patch_size,
                     )
 
         return result
