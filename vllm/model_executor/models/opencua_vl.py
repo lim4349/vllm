@@ -873,20 +873,16 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
-        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
-
-        # For 1D RoPE: generate sequential 1D RoPE for patch level
+        # OpenCUA: Use sequential (full) attention - no window reordering
+        # Generate sequential 1D RoPE for patch level
         # rotary_pos_emb_thw is used BEFORE merger, so it should be in patch units
         # Total patches = t * h * w (not LLM tokens)
-        # Generate sequential 1D RoPE for all patches
-        # This will be assigned based on spatial merge permutation and window reordering
+        # Generate sequential 1D RoPE for all patches in original order
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        # Apply window reordering (exactly like Qwen2.5-VL)
-        # rotary_pos_emb_thw is already grouped by spatial_merge_unit and in
-        # the same order as window_index_thw (LLM token units after spatial merge)
-        # So we can index directly with window_index_thw, just like Qwen2.5-VL
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        # For sequential attention: NO window reordering
+        # Keep RoPE in original sequential order (already grouped by spatial_merge_unit)
+        # Flatten to match hidden_states shape: [seq_len, spatial_merge_unit, rotary_dim
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
 
         # cu_seqlens_thw should be in patch units (h * w per frame)
@@ -894,6 +890,11 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
+
+        # For sequential attention, we still need window_index_thw for compatibility
+        # but it won't be used for reordering
+        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
+
         return (
             rotary_pos_emb_thw,
             window_index_thw,
