@@ -489,17 +489,16 @@ class OpenCUA_VisionBlock(nn.Module):
         max_seqlen: int | None = None,  # Only used for Flash Attention
         seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x_attn = self.attn(
+        # attn + residual
+        x = x + self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
-        # Safe norm call: apply norm2 to x_attn, then add residual
-        # This works with both LayerNorm and RMSNorm
-        x_norm = self.norm2(x_attn)
-        x = x_attn + self.mlp(x_norm)
+        # mlp + residual
+        x = x + self.mlp(self.norm2(x))
         return x
 
 
