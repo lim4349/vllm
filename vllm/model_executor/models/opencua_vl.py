@@ -2127,8 +2127,15 @@ class OpenCUA_VLForConditionalGeneration(
         batch_size, sequence_length = input_ids.shape
 
         # Check if left padding (pad tokens at the start)
-        left_padding = not torch.sum(
-            input_ids[:, -1] == torch.tensor(pad_token_id, device=input_ids.device)
+        # HF checks first token, not last token
+        # If first token is pad, it's left padding
+        first_token_is_pad = (
+            input_ids[:, 0] == torch.tensor(pad_token_id, device=input_ids.device)
+        ).any()
+        left_padding = (
+            first_token_is_pad.item()
+            if isinstance(first_token_is_pad, torch.Tensor)
+            else first_token_is_pad
         )
 
         # 1. Create a mask to know where special image tokens are
@@ -2346,9 +2353,12 @@ class OpenCUA_VLForConditionalGeneration(
             self._cached_position_ids = position_ids
             logger.info(
                 "OpenCUA get_input_embeddings: HF merge complete - "
-                "final_embedding shape: %s, position_ids shape: %s",
+                "final_embedding shape: %s, position_ids shape: %s, "
+                "position_ids min: %d, max: %d",
                 tuple(final_embedding.shape),
                 tuple(position_ids.shape) if position_ids is not None else None,
+                position_ids.min().item() if position_ids is not None else -1,
+                position_ids.max().item() if position_ids is not None else -1,
             )
             return final_embedding
 
