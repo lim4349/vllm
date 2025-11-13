@@ -1482,21 +1482,13 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
         def get_replacement_opencua(item_idx: int, modality: str):
             # OpenCUA follows Qwen2VL's approach: return num_tokens placeholders
-            # The PlaceholderRange.length is set from the actual token count in prompt
+            # Calculate num_tokens from grid_thw like Qwen2VL
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
-            logger.info(
-                "OpenCUA get_replacement_opencua: %s[%d] - "
-                "grid_thw=%s, merge_length=%d, num_tokens=%d",
-                modality,
-                item_idx,
-                grid_thw.tolist(),
-                merge_length,
-                num_tokens,
-            )
+
             return [placeholder[modality]] * num_tokens
 
         return [
