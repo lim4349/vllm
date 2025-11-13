@@ -809,7 +809,6 @@ class OpenCUA_VisionTransformer(nn.Module):
         index_new = torch.arange(
             total_llm_tokens,
             dtype=torch.int32,
-            device=self.device,
         )
 
         # seqlens: "윈도우마다 몇 개의 LLM 토큰이 들어가는지"
@@ -817,7 +816,6 @@ class OpenCUA_VisionTransformer(nn.Module):
         seqlens = torch.tensor(
             [total_llm_tokens],
             dtype=torch.int32,
-            device=self.device,
         )
 
         # Qwen2.5-VL 코드와 동일하게 patch 단위로 맞추기 위해
