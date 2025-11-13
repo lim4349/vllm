@@ -791,30 +791,36 @@ class OpenCUA_VisionTransformer(nn.Module):
         - patch_embed processes patches sequentially in this order
         - RoPE assigns sequential 1D positions (0, 1, 2, ...) matching this order
 
+        For 1D RoPE, each frame uses independent position range [0, h*w-1].
+        This is different from sequential positions across all frames.
+        Each frame's patches get positions [0, 1, 2, ..., h*w-1] independently.
+
         Position mapping:
         - Frame 0: positions [0, 1, 2, ..., h*w-1] (row-major: h slowest, w fastest)
-        - Frame 1: positions [h*w, h*w+1, ..., 2*h*w-1]
+        - Frame 1: positions [0, 1, 2, ..., h*w-1] (repeated)
         - ...
-        - Frame t-1: positions [(t-1)*h*w, ..., t*h*w-1]
+        - Frame t-1: positions [0, 1, 2, ..., h*w-1] (repeated)
 
         After spatial merge permutation and window reordering, positions are
-        reordered but the underlying 1D sequential mapping remains consistent.
+        reordered but each frame maintains its independent [0, h*w-1] range.
         """
         total_patches = h * w
 
-        # Generate sequential 1D positions for all patches in (t, h, w) order
-        # Frame i gets positions [i*h*w, i*h*w+1, ..., (i+1)*h*w-1]
-        # Total positions: [0, 1, 2, ..., t*h*w-1]
-        # This matches the patch order from HF processor: (t, h, w) scan
-        pos_ids_1d = torch.arange(t * total_patches)
+        # For 1D RoPE: each frame uses independent position range [0, h*w-1]
+        # This matches the behavior where each frame is processed independently
+        # Generate positions for one frame: [0, 1, 2, ..., h*w-1]
+        pos_ids_1d_per_frame = torch.arange(total_patches)
 
-        # Generate 1D RoPE for all positions
-        # We need enough positions to cover all possible indices
-        required_size = t * total_patches
+        # Repeat for all frames (each frame gets same position range)
+        pos_ids_1d = pos_ids_1d_per_frame.repeat(t)
+
+        # Generate 1D RoPE for positions [0, ..., h*w-1]
+        # We only need enough positions for one frame since all frames use same range
+        required_size = total_patches
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
-        # Index into 1D RoPE using sequential positions
-        # Each patch gets a position embedding based on its original order
+        # Index into 1D RoPE using per-frame positions
+        # Each patch gets a position embedding based on its position within its frame
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
 
         # Reshape to match spatial_merge_unit grouping
