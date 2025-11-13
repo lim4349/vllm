@@ -2281,6 +2281,23 @@ class OpenCUA_VLForConditionalGeneration(
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """Override to use custom image feature merging logic."""
+        # Force output to stdout/stderr for debugging
+        import sys
+        input_ids_shape = (
+            tuple(input_ids.shape) if input_ids is not None else None
+        )
+        mm_embeds_status = (
+            "present" if multimodal_embeddings is not None else "None"
+        )
+        is_mm_status = "present" if is_multimodal is not None else "None"
+        print(
+            f"[OpenCUA get_input_embeddings CALLED] "
+            f"input_ids shape: {input_ids_shape}, "
+            f"multimodal_embeddings: {mm_embeds_status}, "
+            f"is_multimodal: {is_mm_status}",
+            file=sys.stderr,
+            flush=True,
+        )
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA get_input_embeddings: CALLED - "
@@ -2378,7 +2395,19 @@ class OpenCUA_VLForConditionalGeneration(
         return inputs_embeds
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+        # Force output to stdout/stderr for debugging
+        import sys
+        print(
+            f"[OpenCUA get_multimodal_embeddings CALLED] "
+            f"kwargs keys: {list(kwargs.keys()) if kwargs else []}",
+            file=sys.stderr,
+            flush=True,
+        )
         logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA get_multimodal_embeddings: CALLED - kwargs keys: %s",
+            list(kwargs.keys()) if kwargs else [],
+        )
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             logger.warning("OpenCUA get_multimodal_embeddings: no multimodal inputs")
@@ -2439,6 +2468,29 @@ class OpenCUA_VLForConditionalGeneration(
         MINIMAL PATCH: Merge is done in get_input_embeddings,
         forward just uses standard vLLM flow.
         """
+        # Force output to stdout/stderr for debugging
+        import sys
+        input_ids_shape = (
+            tuple(input_ids.shape) if input_ids is not None else None
+        )
+        inputs_embeds_shape = (
+            tuple(inputs_embeds.shape) if inputs_embeds is not None else None
+        )
+        positions_shape = (
+            tuple(positions.shape) if positions is not None else None
+        )
+        cached_pos_status = (
+            "present" if self._cached_position_ids is not None else "None"
+        )
+        print(
+            f"[OpenCUA forward CALLED] "
+            f"input_ids shape: {input_ids_shape}, "
+            f"inputs_embeds shape: {inputs_embeds_shape}, "
+            f"positions shape: {positions_shape}, "
+            f"cached_position_ids: {cached_pos_status}",
+            file=sys.stderr,
+            flush=True,
+        )
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA forward: CALLED - "
