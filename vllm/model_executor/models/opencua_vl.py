@@ -898,8 +898,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         if remainder != 0:
             rotary_pos_emb_thw = rotary_pos_emb_thw[:total_llm_tokens]
 
+        # cu_seqlens_thw should be in LLM token units, not patch units
+        # After spatial merge, we have llm_h * llm_w tokens per frame
         cu_seqlens_thw = torch.repeat_interleave(
-            torch.tensor([h * w], dtype=torch.int32), t
+            torch.tensor([llm_h * llm_w], dtype=torch.int32), t
         )
         return (
             rotary_pos_emb_thw,
