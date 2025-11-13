@@ -50,7 +50,12 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -1530,6 +1535,15 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
+            logger.info(
+                "OpenCUA get_replacement_opencua: %s[%d] - "
+                "grid_thw=%s, merge_length=%d, num_tokens=%d",
+                modality,
+                item_idx,
+                grid_thw.tolist(),
+                merge_length,
+                num_tokens,
+            )
             return [placeholder[modality]] * num_tokens
 
         return [
@@ -1540,6 +1554,35 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             )
             for modality in ("image", "video")
         ]
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Override to log PlaceholderFeaturesInfo length for debugging."""
+        logger = init_logger(__name__)
+
+        # Call parent method
+        new_token_ids, placeholders = super()._apply_prompt_updates(
+            token_ids=token_ids,
+            mm_prompt_updates=mm_prompt_updates,
+        )
+
+        # Log placeholder lengths
+        for modality, placeholder_list in placeholders.items():
+            for idx, placeholder in enumerate(placeholder_list):
+                logger.info(
+                    "OpenCUA _apply_prompt_updates: %s[%d] - "
+                    "PlaceholderRange(offset=%d, length=%d, tokens_len=%d)",
+                    modality,
+                    idx,
+                    placeholder.start_idx,
+                    len(placeholder.tokens),
+                    len(placeholder.tokens),
+                )
+
+        return new_token_ids, placeholders
 
 
 @MULTIMODAL_REGISTRY.register_processor(
