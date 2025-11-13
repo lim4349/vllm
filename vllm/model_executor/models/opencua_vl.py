@@ -852,22 +852,29 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
 
-        # For 1D RoPE: generate position embeddings based on window reordering order
-        # After window reordering, tokens are in a specific order
-        # We assign sequential 1D positions (0, 1, 2, ...) to tokens in their
-        # window reordering order
+        # For 1D RoPE: map window reordering order to sequential positions
+        # window_index_thw[i] is the original index that goes to position i
+        # after reordering. We need to assign 1D position i to the token at
+        # position i after reordering
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_llm_tokens = t * llm_h * llm_w
 
-        # Generate 1D RoPE for all positions after window reordering
-        # The window reordering order itself becomes the 1D position index
-        pos_ids_1d = torch.arange(total_llm_tokens)
+        # Create mapping: original index -> window reordering position
+        # window_index_thw[i] = original index that ends up at position i
+        # So we create a reverse mapping: original_index -> position_after_reordering
+        reverse_map = torch.zeros(total_llm_tokens, dtype=torch.long)
+        for i, orig_idx in enumerate(window_index_thw):
+            reverse_map[orig_idx] = i
+
+        # Generate 1D RoPE for all positions
         required_size = total_llm_tokens
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
-        # Index into 1D RoPE using sequential positions
-        rotary_pos_emb_flat = rotary_pos_emb_full[pos_ids_1d]
+        # For each original index, assign the 1D position based on where it ends up
+        # after window reordering
+        pos_ids_1d_mapped = reverse_map
+        rotary_pos_emb_flat = rotary_pos_emb_full[pos_ids_1d_mapped]
 
         # Reshape to match spatial_merge_unit grouping
         rotary_pos_emb_thw = rotary_pos_emb_flat.reshape(
