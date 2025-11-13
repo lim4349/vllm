@@ -920,24 +920,26 @@ class OpenCUA_VisionTransformer(nn.Module):
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
-        # For sequential attention, we don't need window_index or cu_window_seqlens
+        # For sequential attention, use 1D RoPE (no window reordering)
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
 
-            (
-                rotary_pos_emb_thw,
-                _window_index_thw,  # Not used for sequential attention
-                _cu_seqlens_window_thw,  # Not used for sequential attention
-                cu_seqlens_thw,
-            ) = self.get_rope_by_thw(t, h, w)
+            # Use 1D RoPE for sequential attention
+            rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
 
-            rotary_pos_emb.append(rotary_pos_emb_thw)
-            cu_seqlens.append(cu_seqlens_thw)
+            # Reshape to match expected format: [S, 1, head_dim/2]
+            rotary_pos_emb_1d = rotary_pos_emb_1d.unsqueeze(1)
+
+            rotary_pos_emb.append(rotary_pos_emb_1d)
+            cu_seqlens.append(cu_seqlens_1d)
 
         rotary_pos_emb = torch.cat(rotary_pos_emb)
         # For sequential attention, we don't need window_index or reverse_indices
         # All layers use full attention, so tokens stay in original order
+        # cu_seqlens_1d is already a tensor with shape [1], so we can concatenate
         cu_seqlens = torch.cat(cu_seqlens)
+        # cu_seqlens_1d contains [total_patches] for each image
+        # We need to compute cumulative sum across all images
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
