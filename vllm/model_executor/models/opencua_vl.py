@@ -742,14 +742,41 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
-        # OpenCUA uses 1D RoPE with sequential positions
-        # After spatial merge permutation, patches are reordered
-        # We need to use sequential indices (0, 1, 2, ...) for 1D RoPE
-        # Total patches after patch_embed (before spatial merge)
-        total_patches = t * h * w
+        # OpenCUA uses 1D RoPE but follows Qwen2.5-VL's structure
+        # Generate 2D position IDs from original patch grid (h, w)
+        # Then apply spatial merge permutation to match the merge order
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
 
-        # For 1D RoPE, use sequential positions: 0, 1, 2, ..., total_patches-1
-        # This matches the actual order of patches after spatial merge permutation
+        # Apply spatial merge permutation (same as Qwen2.5-VL)
+        # This reorders patches to match the spatial merge order
+        hpos_ids = (
+            hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        wpos_ids = (
+            wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+
+        # For 1D RoPE: use sequential positions after spatial merge permutation
+        # After spatial merge permutation, patches are in a specific order
+        # We use sequential 1D positions: 0, 1, 2, ... for this order
+        # The spatial merge permutation is already applied to hpos_ids/wpos_ids,
+        # but for 1D RoPE we just use sequential indices
+        total_patches = t * h * w
         pos_ids_1d = torch.arange(total_patches)
 
         # Generate 1D RoPE for all positions
@@ -757,11 +784,10 @@ class OpenCUA_VisionTransformer(nn.Module):
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
 
         # Index into 1D RoPE using sequential positions
+        # This gives each patch a sequential position embedding
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
 
         # Reshape to match spatial_merge_unit grouping
-        # After spatial merge, we have total_patches // spatial_merge_unit^2 tokens
-        # But rotary_pos_emb is still for total_patches, so we reshape accordingly
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
