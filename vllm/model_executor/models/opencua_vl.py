@@ -837,6 +837,8 @@ class OpenCUA_VisionTransformer(nn.Module):
     def get_rope_by_thw(self, t, h, w):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
+        window_index_groups = window_index_thw // self.spatial_merge_unit
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_groups, :, :]
         rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
@@ -951,17 +953,18 @@ class OpenCUA_VisionTransformer(nn.Module):
             device=hidden_states.device, non_blocking=True
         )
 
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
         hidden_states = hidden_states.unsqueeze(1)
 
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-                max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
-            else:
-                cu_seqlens_now = cu_window_seqlens
-                max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
+            cu_seqlens_now = cu_seqlens
+            max_seqlen_now = max_seqlen_full
+            seqlens_now = seqlens_full
 
             hidden_states = blk(
                 hidden_states,
