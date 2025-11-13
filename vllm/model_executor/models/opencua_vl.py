@@ -1641,6 +1641,8 @@ class OpenCUA_VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        # Cache for HF-style merge position_ids
+        self._cached_position_ids: torch.Tensor | None = None
 
         if multimodal_config.get_limit_per_prompt(
             "image"
@@ -2347,13 +2349,24 @@ class OpenCUA_VLForConditionalGeneration(
 
             # Use custom merging logic
             attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
-            final_embedding, _, _, _ = self._merge_input_ids_with_image_features(
+            (
+                final_embedding,
+                _,
+                _,
+                position_ids,
+            ) = self._merge_input_ids_with_image_features(
                 image_features=image_features_flat,
                 feature_lengths=feature_lengths,
                 inputs_embeds=inputs_embeds,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=None,
+            )
+            # Cache position_ids for use in forward
+            self._cached_position_ids = position_ids
+            logger.info(
+                "OpenCUA get_input_embeddings: Cached position_ids shape: %s",
+                tuple(position_ids.shape) if position_ids is not None else None,
             )
             return final_embedding
 
@@ -2365,6 +2378,8 @@ class OpenCUA_VLForConditionalGeneration(
             )
             from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
+            # Clear cached position_ids when using vLLM merge
+            self._cached_position_ids = None
             return _merge_multimodal_embeddings(
                 inputs_embeds=inputs_embeds,
                 multimodal_embeddings=multimodal_embeddings,
@@ -2431,16 +2446,67 @@ class OpenCUA_VLForConditionalGeneration(
         OpenCUA custom forward with HF-style merge.
         
         PATCH SKETCH:
-        - Bypass vLLM's generic multimodal merge
-        - Process vision inputs directly in forward
-        - Use HF's _merge_input_ids_with_image_features
-        - Generate position_ids from merged attention_mask
-        - Pass to language model with inputs_embeds + attention_mask + position_ids
+        - Use cached position_ids from get_input_embeddings if available
+        - Otherwise fallback to standard vLLM flow
         """
         logger = init_logger(__name__)
         
         if intermediate_tensors is not None:
             inputs_embeds = None
+
+        # If we have cached position_ids from HF-style merge, use them
+        # by overriding positions parameter
+        if self._cached_position_ids is not None and inputs_embeds is not None:
+            logger.info(
+                "OpenCUA forward: Using cached position_ids from HF merge - "
+                "shape: %s, positions shape: %s",
+                tuple(self._cached_position_ids.shape),
+                tuple(positions.shape),
+            )
+            # Use cached position_ids instead of vLLM's positions
+            # Extract the first row (all rows are the same for 1D RoPE)
+            if self._cached_position_ids.ndim == 2:
+                # Shape: (batch_size, seq_len)
+                cached_positions = self._cached_position_ids
+            else:
+                cached_positions = self._cached_position_ids
+
+            # Ensure positions match the batch size and sequence length
+            batch_size = inputs_embeds.shape[0]
+            seq_len = inputs_embeds.shape[1]
+            
+            if (
+                cached_positions.shape[0] == batch_size
+                and cached_positions.shape[1] == seq_len
+            ):
+                # Use cached positions, but ensure it matches the expected format
+                # vLLM expects positions to be flattened for the batch
+                positions_flat = cached_positions.flatten()
+                
+                logger.info(
+                    "OpenCUA forward: Overriding positions with cached position_ids"
+                )
+                
+                hidden_states = self.language_model.model(
+                    input_ids=None,  # Use inputs_embeds instead
+                    positions=positions_flat,  # Use cached position_ids
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+                
+                # Clear cache after use
+                self._cached_position_ids = None
+                return hidden_states
+            else:
+                logger.warning(
+                    "OpenCUA forward: Cached position_ids shape mismatch - "
+                    "cached: %s, expected: (%d, %d), using default positions",
+                    tuple(cached_positions.shape),
+                    batch_size,
+                    seq_len,
+                )
+                # Clear invalid cache
+                self._cached_position_ids = None
 
         # Check if we have multimodal inputs in kwargs
         # vLLM may pass pixel_values, image_grid_thw, etc. via kwargs
