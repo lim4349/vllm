@@ -880,7 +880,8 @@ class OpenCUA_VisionTransformer(nn.Module):
         # This function computes the inverse permutation to restore original order
         # after window attention processing
         # building the inverse permutation in O(n) time
-        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
+        pin_memory = is_pin_memory_available() and perm.device.type == "cpu"
+        inv = torch.empty_like(perm, pin_memory=pin_memory)
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
