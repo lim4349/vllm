@@ -780,10 +780,9 @@ class OpenCUA_VisionTransformer(nn.Module):
     def rotary_pos_emb_thw(self, t, h, w):
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
-        pos_ids_1d = torch.arange(llm_h * llm_w).repeat(t, 1)
+        pos_ids_1d = torch.arange(llm_h * llm_w).unsqueeze(0).repeat(t, 1)
         frame_offsets = torch.arange(t).unsqueeze(1) * (llm_h * llm_w)
-        pos_ids_1d = pos_ids_1d + frame_offsets
-        pos_ids_1d = pos_ids_1d.flatten()
+        pos_ids_1d = (pos_ids_1d + frame_offsets).flatten()
         required_size = t * llm_h * llm_w
         rotary_pos_emb_full = self.rotary_pos_emb_1d(required_size)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids_1d]
