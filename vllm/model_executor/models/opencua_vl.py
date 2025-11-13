@@ -2009,10 +2009,12 @@ class OpenCUA_VLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += vision_embeddings
+                # Ensure tuple format for consistency with other models
+                multimodal_embeddings += tuple(vision_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += video_embeddings
+                # Ensure tuple format for consistency with other models
+                multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
     def forward(
