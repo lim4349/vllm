@@ -53,6 +53,7 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
+    PromptReplacement,
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
@@ -1546,10 +1547,19 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
             return [placeholder[modality]] * num_tokens
 
-        # MINIMAL PATCH: Disable placeholder expansion to ensure HF-style merge path
-        # This ensures input_ids has exactly 1 placeholder per image/video
-        # which triggers HF-style merge in get_input_embeddings
-        return []
+        # Return PromptReplacement for vLLM's placeholder expansion mechanism
+        # Note: Even though we use HF-style merge in get_input_embeddings,
+        # vLLM's profiling and preprocessing still need placeholder updates
+        from functools import partial
+
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_opencua, modality=modality),
+            )
+            for modality in ("image", "video")
+        ]
 
     def _apply_prompt_updates(
         self,
