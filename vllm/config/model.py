@@ -538,25 +538,11 @@ class ModelConfig:
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
-        # OpenCUA uses 1D RoPE, not 3D MRoPE
-        # Do NOT set mrope_section for OpenCUA, as it uses regular RotaryEmbedding
-        # MRotaryEmbedding expects 3D positions (T, H, W), but OpenCUA uses 1D sequential positions
-        # If mrope_section is set, remove it to use regular RotaryEmbedding
-        if (
-            hasattr(hf_config, "model_type")
-            and hf_config.model_type == "opencua"
-            and hasattr(hf_config, "get_text_config")
-        ):
-            text_config = hf_config.get_text_config()
-            if text_config:
-                rope_scaling = getattr(text_config, "rope_scaling", None)
-                if isinstance(rope_scaling, dict) and "mrope_section" in rope_scaling:
-                    # Remove mrope_section to use regular RotaryEmbedding for 1D RoPE
-                    rope_scaling = {k: v for k, v in rope_scaling.items() if k != "mrope_section"}
-                    if not rope_scaling:
-                        text_config.rope_scaling = None
-                    else:
-                        text_config.rope_scaling = rope_scaling
+        # OpenCUA uses 1D RoPE but still needs get_mrope_input_positions() to be called
+        # for proper position calculation with visual tokens.
+        # Keep mrope_section to ensure uses_mrope() returns True, which triggers
+        # get_mrope_input_positions(). The actual positions will be 1D sequential,
+        # not 3D MRoPE, but the interface requires mrope_section to be present.
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None

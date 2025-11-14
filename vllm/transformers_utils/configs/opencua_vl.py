@@ -68,6 +68,13 @@ class OpenCUA_VLConfig(PretrainedConfig):
                 "rope_type": "default",
                 "mrope_section": mrope_section,
             }
+            # Log for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "OpenCUA_VLConfig - Set rope_scaling: %s",
+                text_config.rope_scaling,
+            )
 
         # HF 표준
         self.ignore_index = ignore_index
