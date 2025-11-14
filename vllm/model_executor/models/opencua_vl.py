@@ -546,45 +546,43 @@ class OpenCUA_VisionPatchMerger(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
 
-        self.mlp = nn.Sequential(
-            ColumnParallelLinear(
-                self.hidden_size,
-                self.hidden_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp.0",
-                return_bias=False,
-                disable_tp=use_data_parallel,
-            ),
-            nn.GELU(),
-            RowParallelLinear(
-                self.hidden_size,
-                d_model,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp.2",
-                return_bias=False,
-                disable_tp=use_data_parallel,
-            ),
+        # Match Qwen2.5-VL implementation: use ModuleList instead of Sequential
+        self.mlp = nn.ModuleList(
+            [
+                ColumnParallelLinear(
+                    self.hidden_size,
+                    self.hidden_size,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.0",
+                    disable_tp=use_data_parallel,
+                ),
+                nn.GELU(),
+                RowParallelLinear(
+                    self.hidden_size,
+                    d_model,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.2",
+                    disable_tp=use_data_parallel,
+                ),
+            ]
         )
 
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
+        # Match Qwen2.5-VL implementation exactly
         # OpenCUA uses 1D RoPE, so vision transformer output is
         # already in 1D order. Use simple reshape like Qwen2.5-VL.
         x = self.ln_q(x)
-        
-        # Qwen2.5-VL style: simple view reshape
-        # The vision transformer with 1D RoPE outputs patches in
-        # sequential order. We need to reshape to
-        # [num_merged_tokens, hidden_size] where
-        # hidden_size = context_dim * spatial_merge_size^2
-        # This groups spatial_merge_size^2 patches together
-        # Ensure contiguous memory layout for better performance
-        x = x.contiguous().view(-1, self.hidden_size)
-        
-        out = self.mlp(x)
+        x = x.view(-1, self.hidden_size)
+
+        # Match Qwen2.5-VL: use ModuleList indexing instead of Sequential
+        mlp_fc1, mlp_act, mlp_fc2 = self.mlp
+        x_parallel, _ = mlp_fc1(x)
+        x_parallel = mlp_act(x_parallel)
+        out, _ = mlp_fc2(x_parallel)
         return out
 
 
@@ -830,10 +828,9 @@ class OpenCUA_VisionTransformer(nn.Module):
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # Squeeze batch dimension before merger
-        # [seq_len, 1, context_dim] -> [seq_len, context_dim]
-        hidden_states = hidden_states.squeeze(1)
-        hidden_states = self.merger(hidden_states, grid_thw=grid_thw)
+        # Match Qwen2.5-VL: pass directly to merger without squeeze
+        # The merger's view(-1, hidden_size) handles the batch dimension automatically
+        hidden_states = self.merger(hidden_states)
         
         # Logging
         logger.info(
