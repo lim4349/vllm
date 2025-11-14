@@ -13,7 +13,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoImageProcessor, AutoProcessor, BatchFeature
+from transformers import AutoImageProcessor, BatchFeature
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -767,33 +767,152 @@ class OpenCUAVisionTransformer(nn.Module):
 class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Cache processor to avoid multiple reloads
+        # Cache for processor to avoid reloading
         self._cached_processor: object | None = None
-        self._cached_processor_path: str | None = None
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(OpenCUA_VLConfig)
+        # Try to get OpenCUA_VLConfig first
+        try:
+            config = self.ctx.get_hf_config(OpenCUA_VLConfig)
+        except TypeError:
+            # If the loaded config is OpenCUAConfig from the model repository,
+            # load it directly and add vLLM-specific attributes if needed
+            from transformers import AutoConfig
+
+            model_path = self.ctx.model_config.model
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            # If it's already OpenCUAConfig from HF, add vLLM-specific attributes
+            if hasattr(config, "model_type") and config.model_type == "opencua":
+                # Add vLLM-specific attributes if they don't exist
+                if not hasattr(config, "image_token_id"):
+                    config.image_token_id = getattr(
+                        config, "media_placeholder_token_id", 151664
+                    )
+                if not hasattr(config, "video_token_id"):
+                    config.video_token_id = getattr(
+                        config, "media_placeholder_token_id", 151664
+                    )
+                if not hasattr(config, "vision_start_token_id"):
+                    config.vision_start_token_id = 151661
+                if not hasattr(config, "vision_end_token_id"):
+                    config.vision_end_token_id = 151663
+                if not hasattr(config, "use_1d_rope"):
+                    config.use_1d_rope = True
+            else:
+                # Convert to OpenCUA_VLConfig if it's a different config
+                config_dict = config.to_dict()
+                config = OpenCUA_VLConfig.from_dict(config_dict)
+        return config
 
     def get_hf_processor(self, **kwargs: object):
-        """
-        Load processor directly from OpenCUA model using AutoProcessor.
-        AutoProcessor will automatically detect and load the correct processor
-        based on the model's config, handling TikTokenV3 tokenizer correctly.
-        Uses cached processor to avoid multiple reloads.
-        """
+        # If cached processor exists and max_pixels is not changing, return it
+        if self._cached_processor is not None:
+            # If max_pixels is provided in kwargs, update the cached
+            # processor's image_processor
+            if "max_pixels" in kwargs and hasattr(
+                self._cached_processor, "image_processor"
+            ):
+                current_max = getattr(
+                    self._cached_processor.image_processor, "max_pixels", None
+                )
+                new_max = kwargs["max_pixels"]
+                if current_max is None or current_max < new_max:
+                    self._cached_processor.image_processor.max_pixels = new_max
+            return self._cached_processor
+
+        from transformers import AutoImageProcessor, AutoTokenizer
+        from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
+
+        # OpenCUA model path - use OpenCUA's own preprocessor/tokenizer
         model_path = self.ctx.model_config.model
         use_fast = kwargs.pop("use_fast", True)
 
-        # Use cached processor to avoid multiple reloads
-        if self._cached_processor is None or self._cached_processor_path != model_path:
-            self._cached_processor = AutoProcessor.from_pretrained(
-                model_path,
-                use_fast=use_fast,
-                trust_remote_code=True,
-            )
-            self._cached_processor_path = model_path
+        qwen2_vl_base = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-        return self._cached_processor
+        # Priority 1: Try to load image processor from OpenCUA model path
+        opencua_image_processor = None
+        try:
+            opencua_image_processor = AutoImageProcessor.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load OpenCUA image processor from %s: %s. "
+                "Will use Qwen2.5-VL processor.",
+                model_path,
+                e,
+            )
+
+        # Load Qwen2.5-VL processor (has min_pixels attribute required by vLLM)
+        processor = Qwen2_5_VLProcessor.from_pretrained(
+            qwen2_vl_base,
+            trust_remote_code=True,
+            use_fast=use_fast,
+            **kwargs,
+        )
+
+        # Replace image processor with OpenCUA's if available
+        if opencua_image_processor is not None:
+            qwen_image_processor = processor.image_processor
+
+            # Priority: 1) kwargs max_pixels, 2) Qwen2.5-VL processor max_pixels,
+            # 3) OpenCUA's max_pixels
+            target_max_pixels = None
+            if "max_pixels" in kwargs:
+                target_max_pixels = kwargs["max_pixels"]
+            elif hasattr(qwen_image_processor, "max_pixels"):
+                target_max_pixels = qwen_image_processor.max_pixels
+
+            if not hasattr(opencua_image_processor, "min_pixels") and hasattr(
+                qwen_image_processor, "min_pixels"
+            ):
+                opencua_image_processor.min_pixels = qwen_image_processor.min_pixels
+
+            if target_max_pixels is not None:
+                if not hasattr(opencua_image_processor, "max_pixels"):
+                    opencua_image_processor.max_pixels = target_max_pixels
+                else:
+                    current_max = opencua_image_processor.max_pixels
+                    if current_max < target_max_pixels:
+                        opencua_image_processor.max_pixels = target_max_pixels
+            processor.image_processor = opencua_image_processor
+
+        # Load OpenCUA tokenizer (highest priority)
+        opencua_tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            use_fast=use_fast,
+        )
+
+        # Replace processor's tokenizer with OpenCUA tokenizer
+        processor.tokenizer = opencua_tokenizer
+
+        # Get OpenCUA config for token IDs
+        hf_config = self.get_hf_config()
+
+        vocab = opencua_tokenizer.get_vocab()
+        if "<|media_placeholder|>" not in vocab:
+            raise ValueError(
+                "<|media_placeholder|> not found in OpenCUA tokenizer vocab. "
+                "This is required for proper text recognition."
+            )
+
+        media_placeholder_id = vocab["<|media_placeholder|>"]
+
+        # Sync config with actual token IDs from tokenizer
+        if hasattr(hf_config, "image_token_id"):
+            hf_config.image_token_id = media_placeholder_id
+            if hasattr(hf_config, "video_token_id"):
+                hf_config.video_token_id = media_placeholder_id
+
+        processor.image_token = "<|media_placeholder|>"
+        processor.video_token = "<|media_placeholder|>"
+
+        # Cache the processor to avoid reloading
+        self._cached_processor = processor
+        return processor
 
     def get_image_processor(self, **kwargs: object):
         """
@@ -887,38 +1006,14 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """
-        Call HF processor with proper keyword handling.
-        OpenCUA processor may not recognize 'images' keyword if it's filtered out.
-        We need to ensure the processor receives the data correctly.
+        Call the HF processor on the prompt text and associated multi-modal data.
         """
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-
-        # Prepare data dict - ensure images are included
-        data_dict = dict(text=prompt)
-        data_dict.update(mm_data)
-
-        # Call processor directly, bypassing keyword filtering
-        # This ensures 'images' keyword is passed through
-        try:
-            output = hf_processor(**data_dict, **tok_kwargs)
-        except Exception as exc:
-            # If images keyword is not recognized, try with vision_infos
-            if "not recognized" in str(exc) and "images" in mm_data:
-                # OpenCUA might use vision_infos instead of images
-                data_dict_alt = dict(text=prompt)
-                if "images" in data_dict:
-                    data_dict_alt["vision_infos"] = data_dict.pop("images")
-                output = hf_processor(**data_dict_alt, **tok_kwargs)
-            else:
-                raise
-
-        # Ensure BatchFeature is returned
-        from transformers.feature_extraction_utils import BatchFeature
-
-        if not isinstance(output, BatchFeature):
-            output = BatchFeature(output, tensor_type="pt")
-
-        return output
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
     def _get_prompt_updates(
         self,
@@ -926,79 +1021,91 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        # Use Qwen2.5-VL's approach: get token IDs from processor's
+        # image_token/video_token strings
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-        config = self.info.get_hf_config()
 
-        # Get image token - try processor first, then config, then tokenizer vocab
-        if hasattr(hf_processor, "image_token"):
-            image_token_str = hf_processor.image_token
-        elif hasattr(config, "image_token_id"):
-            # Use image_token_id from config to find token string
-            image_token_id = config.image_token_id
-            # Reverse lookup in vocab
-            image_token_str = None
-            for token, token_id in vocab.items():
-                if token_id == image_token_id:
-                    image_token_str = token
-                    break
-            if image_token_str is None:
-                # Fallback: try common token names
-                for token_name in [
-                    "<|media_placeholder|>",
-                    "<|image_pad|>",
-                    "<|image|>",
-                ]:
-                    if token_name in vocab:
-                        image_token_str = token_name
-                        break
-        else:
-            # Final fallback: try common token names
-            image_token_str = None
-            for token_name in [
-                "<|media_placeholder|>",
-                "<|image_pad|>",
-                "<|image|>",
-            ]:
-                if token_name in vocab:
-                    image_token_str = token_name
-                    break
-
-        if image_token_str is None or image_token_str not in vocab:
+        if hf_processor.image_token != "<|media_placeholder|>":
             raise ValueError(
-                "Could not find image token in processor, config, or tokenizer vocab"
+                f"processor.image_token must be '<|media_placeholder|>', "
+                f"but got '{hf_processor.image_token}'. "
+                f"This will break text recognition. "
+                f"Please ensure OpenCUA processor is correctly configured."
             )
 
+        if hf_processor.image_token not in vocab:
+            raise ValueError(
+                f"processor.image_token '{hf_processor.image_token}' "
+                f"not found in vocab. "
+                f"This will break text recognition."
+            )
+
+        # Get actual token ID from vocab
+        media_placeholder_id = vocab[hf_processor.image_token]
+
+        # Get config for consistency check
+        hf_config = self.info.get_hf_config()
+
+        if hasattr(hf_config, "image_token_id"):
+            hf_config.image_token_id = media_placeholder_id
+            if hasattr(hf_config, "video_token_id"):
+                hf_config.video_token_id = media_placeholder_id
+
+        # Use the actual token ID from vocab (not from config)
+        replacement_token_id = {
+            "image": media_placeholder_id,
+            "video": media_placeholder_id,  # OpenCUA may use same token
+        }
+
         placeholder = {
-            "image": vocab[image_token_str],
+            "image": media_placeholder_id,
+            "video": media_placeholder_id,
         }
 
         merge_length = image_processor.merge_size**2
+        hf_config = self.info.get_hf_config()
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        if image_processor.merge_size != spatial_merge_size:
+            logger.warning(
+                "image_processor.merge_size (%s) != "
+                "spatial_merge_size (%s). "
+                "Using image_processor.merge_size for compatibility.",
+                image_processor.merge_size,
+                spatial_merge_size,
+            )
 
         def get_replacement_opencua(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
-            num_tokens = int(grid_thw.prod()) // merge_length
+            # grid_thw shape: (t, h, w) - temporal, height, width in patches
+            # num_tokens = (t×h×w) // merge_length
+            grid_t, grid_h, grid_w = map(int, grid_thw)
+            total_patches = grid_t * grid_h * grid_w
+            num_tokens = total_patches // merge_length
 
-            return [placeholder[modality]] * num_tokens
-
-        # Only process modalities that exist in mm_items
-        # out_mm_kwargs should be populated by this point from HF processor
-        prompt_updates = []
-        if "image" in mm_items:
-            prompt_updates.append(
-                PromptReplacement(
-                    modality="image",
-                    target=[placeholder["image"]],
-                    replacement=partial(get_replacement_opencua, modality="image"),
-                )
+            assert num_tokens > 0, (
+                f"Calculated {num_tokens} visual tokens for {modality} item {item_idx} "
+                f"(grid_thw=[{grid_t}, {grid_h}, {grid_w}], "
+                f"total_patches={total_patches}, merge_length={merge_length}). "
+                f"This will break text recognition. "
+                f"Check image processing configuration."
             )
 
-        return prompt_updates
+            return [replacement_token_id[modality]] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_opencua, modality=modality),
+            )
+            for modality in ("image", "video")
+        ]
 
 
 @MULTIMODAL_REGISTRY.register_processor(
