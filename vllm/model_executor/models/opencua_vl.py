@@ -43,9 +43,14 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargs,
+)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -58,7 +63,6 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as OpenCUAVLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
@@ -796,6 +800,67 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
         return image_processor
+
+
+class OpenCUAVLDummyInputsBuilder(BaseDummyInputsBuilder[OpenCUAVLProcessingInfo]):
+    """Dummy inputs builder for OpenCUA model."""
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        """
+        Get dummy text for OpenCUA model.
+        Uses image token directly from config or processor.
+        """
+        num_images = mm_counts.get("image", 0)
+
+        # Try to get image token from processor, fallback to config
+        try:
+            hf_processor = self.info.get_hf_processor()
+            # Check if processor has image_token attribute
+            if hasattr(hf_processor, "image_token"):
+                image_token: str = hf_processor.image_token
+            else:
+                # Fallback: use tokenizer to get image token
+                tokenizer = self.info.get_tokenizer()
+                # OpenCUA uses <|media_placeholder|> or similar
+                # Try common image token names
+                for token_name in [
+                    "<|media_placeholder|>",
+                    "<|image_pad|>",
+                    "<|image|>",
+                ]:
+                    if token_name in tokenizer.get_vocab():
+                        image_token = token_name
+                        break
+                else:
+                    # Default fallback
+                    image_token = "<|media_placeholder|>"
+        except Exception:
+            # Final fallback
+            image_token = "<|media_placeholder|>"
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, Any] | None = None,
+    ) -> MultiModalDataDict:
+        """Get dummy multimodal data for OpenCUA model."""
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = self.info.get_image_size_with_most_features()
+
+        image_overrides = mm_options.get("image") if mm_options else None
+
+        return {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            ),
+        }
 
 
 class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
