@@ -1413,6 +1413,9 @@ class OpenCUA_VLForConditionalGeneration(
         # Store the actual length of embeddings returned by get_input_embeddings
         # This is needed because _preprocess truncates to num_scheduled_tokens
         self._last_embeddings_length: int | None = None
+        # Cache full multimodal embeddings to avoid re-computation
+        # Key: tuple of (input_ids hash, is_multimodal hash)
+        self._mm_embeddings_cache: dict[tuple[int, int], MultiModalEmbeddings] = {}
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -1808,6 +1811,18 @@ class OpenCUA_VLForConditionalGeneration(
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 multimodal_embeddings += video_embeddings
+        
+        # Cache full embeddings for use in get_input_embeddings
+        # Use a simple hash of kwargs to identify the same request
+        cache_key = hash(tuple(sorted(kwargs.items())))
+        if cache_key not in self._mm_embeddings_cache:
+            self._mm_embeddings_cache[cache_key] = multimodal_embeddings
+            # Limit cache size to avoid memory issues
+            if len(self._mm_embeddings_cache) > 100:
+                # Remove oldest entry (simple FIFO)
+                oldest_key = next(iter(self._mm_embeddings_cache))
+                del self._mm_embeddings_cache[oldest_key]
+        
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1867,28 +1882,80 @@ class OpenCUA_VLForConditionalGeneration(
                 )
         
         # CRITICAL: OpenCUA expands 1 placeholder to multiple visual tokens.
-        # _gather_mm_embeddings may filter multimodal_embeddings to match
-        # is_multimodal.sum(), but we need the full visual tokens.
-        # 
-        # multimodal_embeddings is a tuple of tensors, where each tensor
-        # corresponds to one image/video and contains all visual tokens.
-        # _flatten_embeddings concatenates them, but if _gather_mm_embeddings
-        # filtered them, we may only get 1 token per placeholder.
+        # _gather_mm_embeddings filters multimodal_embeddings to match
+        # is_multimodal.sum(), giving us only 1 token per placeholder.
+        # But we need the full visual tokens (e.g., 1344 tokens).
         #
-        # Solution: Use multimodal_embeddings directly without filtering.
-        # Each element in multimodal_embeddings is the full visual tokens
-        # for one image/video.
+        # Solution: Check if multimodal_embeddings is filtered (only 1 token
+        # per placeholder). If so, we need to get the full visual tokens.
+        # Since we can't access encoder_cache directly, we detect filtered
+        # embeddings by checking if num_mm_tokens < expected visual tokens.
+        #
+        # For OpenCUA, each placeholder should expand to ~1344 visual tokens
+        # (based on grid_thw and spatial_merge_size). If we get fewer,
+        # multimodal_embeddings is filtered and we need to use the full version.
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
         num_mm_tokens = mm_embeds_flat.shape[0]
+        num_placeholders = (
+            is_multimodal.sum().item() if is_multimodal is not None else 0
+        )
+        
+        # Check if multimodal_embeddings is filtered (1 token per placeholder)
+        # OpenCUA typically has 1344 visual tokens per image
+        is_filtered = num_mm_tokens == num_placeholders and num_placeholders > 0
         
         logger.info(
             "OpenCUA get_input_embeddings - after flatten: "
             "mm_embeds_flat.shape=%s, num_mm_tokens=%d, "
-            "multimodal_embeddings len=%d",
+            "num_placeholders=%d, is_filtered=%s",
             mm_embeds_flat.shape,
             num_mm_tokens,
-            len(multimodal_embeddings) if multimodal_embeddings else 0,
+            num_placeholders,
+            is_filtered,
         )
+        
+        # If filtered, try to get full embeddings from cache
+        # _gather_mm_embeddings filters to match is_multimodal.sum(), but we
+        # need the full visual tokens. Try to find cached full embeddings.
+        if is_filtered and num_placeholders == 1:
+            # Look for cached full embeddings
+            # Find embeddings with shape[0] > 1 (full visual tokens)
+            full_embeddings = None
+            for cached_embeds in self._mm_embeddings_cache.values():
+                if len(cached_embeds) > 0:
+                    first_embed = cached_embeds[0]
+                    if (
+                        isinstance(first_embed, torch.Tensor)
+                        and first_embed.shape[0] > 1
+                    ):
+                        # Found full embeddings
+                        full_embeddings = cached_embeds
+                        logger.info(
+                            "OpenCUA get_input_embeddings - "
+                            "using cached full embeddings: shape=%s",
+                            first_embed.shape,
+                        )
+                        break
+            
+            if full_embeddings is not None:
+                # Use full embeddings instead of filtered ones
+                multimodal_embeddings = full_embeddings
+                mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+                num_mm_tokens = mm_embeds_flat.shape[0]
+                logger.info(
+                    "OpenCUA get_input_embeddings - "
+                    "replaced filtered embeddings: new num_mm_tokens=%d",
+                    num_mm_tokens,
+                )
+            else:
+                logger.warning(
+                    "OpenCUA get_input_embeddings - "
+                    "multimodal_embeddings filtered: got %d tokens for "
+                    "%d placeholders. Expected ~1344 tokens. "
+                    "No cached full embeddings found.",
+                    num_mm_tokens,
+                    num_placeholders,
+                )
         
         # Get text embeddings (excluding placeholder tokens)
         # Use handle_oov_mm_token=True to skip placeholder tokens
