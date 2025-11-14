@@ -1821,31 +1821,25 @@ class OpenCUA_VLForConditionalGeneration(
         """
         logger = init_logger(__name__)
         
-        # For multimodal models, positions may be shorter than inputs_embeds
-        # because scheduler only counts text tokens. Expand positions to match
-        # inputs_embeds length (which includes visual tokens).
+        # For multimodal models, positions may be shorter than the actual sequence
+        # because scheduler only counts text tokens. We need to expand positions
+        # to match the full sequence length including visual tokens.
+        # The positions passed here are from _calc_mrope_positions which only
+        # copies num_scheduled_tokens (28) from req.mrope_positions (1371).
+        # We need to detect if we're in the prefill phase and expand positions
+        # to the full length.
         if inputs_embeds is not None:
             current_len = positions.shape[-1]
             target_len = inputs_embeds.shape[0]
             
-            logger.info(
-                "OpenCUA forward - checking positions expansion: "
-                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d",
-                current_len,
-                target_len,
-            )
-            
+            # Expand positions if inputs_embeds is longer than positions
+            # This handles the case where visual tokens are included in inputs_embeds
+            # but positions only include text tokens
             if current_len < target_len:
-                # positions is (3, L) where L < inputs_embeds.shape[0]
-                # Expand to match inputs_embeds length using 1D sequential positions
-                # Get the last position value from each dimension
+                # Expand positions to match inputs_embeds length
                 last_positions = positions[:, -1:]  # (3, 1)
-                
-                # Generate sequential positions for the remaining tokens
-                # For 1D RoPE, all 3 dimensions should have the same values
                 remaining_len = target_len - current_len
                 if remaining_len > 0:
-                    # Create sequential positions starting from last position + 1
                     start_pos = last_positions[0, 0].item() + 1
                     new_positions_1d = torch.arange(
                         start_pos,
@@ -1853,27 +1847,31 @@ class OpenCUA_VLForConditionalGeneration(
                         dtype=positions.dtype,
                         device=positions.device,
                     )
-                    # Expand to (3, remaining_len) for MRoPE interface
                     new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
-                    
-                    # Concatenate with existing positions
                     positions = torch.cat([positions, new_positions], dim=-1)
                     
                     logger.info(
                         "OpenCUA forward - expanded positions from %d to %d "
-                        "(added %d visual token positions)",
+                        "(added %d positions based on inputs_embeds length)",
                         current_len,
                         target_len,
                         remaining_len,
                     )
             elif current_len > target_len:
-                # Trim positions if it's longer than inputs_embeds
+                # Trim positions if longer than inputs_embeds
                 positions = positions[:, :target_len]
                 logger.info(
                     "OpenCUA forward - trimmed positions from %d to %d",
                     current_len,
                     target_len,
                 )
+            
+            logger.info(
+                "OpenCUA forward - positions expansion check: "
+                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d",
+                positions.shape[-1],
+                target_len,
+            )
         
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
