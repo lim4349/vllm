@@ -2336,6 +2336,11 @@ class OpenCUA_VLForConditionalGeneration(
         image_token_id = self.config.media_placeholder_token_id
         num_expected_placeholders = len(feature_lengths)
 
+        # Handle input_ids shape: can be 1D or 2D
+        if input_ids.dim() == 1:
+            # Reshape to 2D for processing
+            input_ids = input_ids.unsqueeze(0)
+
         # Check if input_ids already has expanded placeholders
         image_token_mask = input_ids == image_token_id
         num_placeholders_in_input = image_token_mask.sum().item()
