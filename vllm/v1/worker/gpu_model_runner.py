@@ -1545,19 +1545,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # but not in prompt_token_ids (which only has placeholder tokens)
             if req.mrope_positions is not None:
                 num_prompt_tokens = req.mrope_positions.shape[1]
+                # For multimodal models, num_scheduled_tokens from scheduler only
+                # includes text tokens (with placeholders), but we need to account
+                # for visual tokens. Calculate the actual scheduled length
+                # including visual tokens.
+                # If we're still in the prompt phase, use the full prompt length.
+                if num_computed_tokens + num_scheduled_tokens <= num_prompt_tokens:
+                    # Still processing prompt: use actual scheduled length
+                    # including visual tokens
+                    text_token_len = length_from_prompt_token_ids_or_embeds(
+                        req.prompt_token_ids, req.prompt_embeds
+                    )
+                    visual_token_len = num_prompt_tokens - text_token_len
+                    actual_scheduled_len = min(
+                        num_scheduled_tokens + visual_token_len,
+                        num_prompt_tokens - num_computed_tokens
+                    )
+                else:
+                    # In completion phase: use scheduler's num_scheduled_tokens
+                    actual_scheduled_len = num_scheduled_tokens
             else:
                 num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
                     req.prompt_token_ids, req.prompt_embeds
                 )
+                actual_scheduled_len = num_scheduled_tokens
 
-            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+            if num_computed_tokens + actual_scheduled_len > num_prompt_tokens:
                 prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
+                completion_part_len = max(0, actual_scheduled_len - prompt_part_len)
             else:
-                prompt_part_len = num_scheduled_tokens
+                prompt_part_len = actual_scheduled_len
                 completion_part_len = 0
 
-            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+            assert actual_scheduled_len == prompt_part_len + completion_part_len
 
             if prompt_part_len > 0:
                 # prompt's mrope_positions are pre-computed
