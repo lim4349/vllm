@@ -1391,8 +1391,20 @@ class OpenCUA_VLForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        logger = init_logger(__name__)
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        
+        # Log MRoPE detection status
+        text_config = config.get_text_config()
+        rope_scaling = (
+            getattr(text_config, "rope_scaling", None) if text_config else None
+        )
+        logger.info(
+            "OpenCUA __init__ - uses_mrope: %s, text_config.rope_scaling: %s",
+            vllm_config.model_config.uses_mrope,
+            rope_scaling,
+        )
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
