@@ -53,6 +53,7 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
+    PromptReplacement,
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
@@ -1549,25 +1550,26 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "video": media_placeholder_id,
         }
 
-        merge_length = image_processor.merge_size**2
-
         def get_replacement_opencua(item_idx: int, modality: str):
-            # OpenCUA: Each placeholder token expands to feature_lengths tokens.
-            # Calculate num_tokens from grid_thw (same as Qwen2VL).
-            # The placeholder token type is single: <|media_placeholder|> (ID: 151664),
-            # but each instance expands to num_tokens based on image/video size.
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
+            # OpenCUA uses HF-style merge in get_input_embeddings,
+            # which expects original placeholders (1 per image), not expanded ones.
+            # Return original placeholder only (no expansion).
+            return [placeholder[modality]]
 
-            num_tokens = int(grid_thw.prod()) // merge_length
+        # Return PromptReplacement for vLLM's profiling/preprocessing,
+        # but replacement returns original placeholder (1 per image) only.
+        # The actual expansion happens in get_input_embeddings via
+        # _merge_input_ids_with_image_features.
+        from functools import partial
 
-            return [placeholder[modality]] * num_tokens
-
-        # OpenCUA uses HF-style merge in get_input_embeddings,
-        # which expects original placeholders (1 per image), not expanded ones.
-        # Return empty list to prevent vLLM from expanding placeholders.
-        return []
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_opencua, modality=modality),
+            )
+            for modality in ("image", "video")
+        ]
 
     def _apply_prompt_updates(
         self,
