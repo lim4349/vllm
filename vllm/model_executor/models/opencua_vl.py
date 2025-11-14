@@ -938,6 +938,7 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             return [placeholder[modality]] * num_tokens
 
         # Only process modalities that exist in mm_items
+        # out_mm_kwargs should be populated by this point from HF processor
         prompt_updates = []
         if "image" in mm_items:
             prompt_updates.append(
