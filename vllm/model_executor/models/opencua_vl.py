@@ -13,7 +13,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoProcessor, BatchFeature
+from transformers import AutoImageProcessor, AutoProcessor, BatchFeature
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -782,6 +782,20 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
         return processor
+
+    def get_image_processor(self, **kwargs: object):
+        """
+        Load image processor directly from OpenCUA model using AutoImageProcessor.
+        This ensures we get the image processor even if AutoProcessor fails.
+        """
+        model_path = self.ctx.model_config.model
+        # Load image processor directly from model path, same as HF
+        image_processor = AutoImageProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            **kwargs,
+        )
+        return image_processor
 
 
 class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
