@@ -2340,6 +2340,20 @@ class OpenCUA_VLForConditionalGeneration(
         if input_ids.dim() == 1:
             # Reshape to 2D for processing
             input_ids = input_ids.unsqueeze(0)
+            # If input_ids was 1D, is_multimodal might also be 1D
+            if is_multimodal.dim() == 1:
+                is_multimodal = is_multimodal.unsqueeze(0)
+
+        # Ensure input_ids and is_multimodal have matching batch dimensions
+        input_ids_batch_size = input_ids.shape[0]
+        if input_ids_batch_size != batch_size:
+            # If batch sizes don't match, use input_ids batch size
+            batch_size = input_ids_batch_size
+            if is_multimodal.shape[0] != batch_size:
+                if is_multimodal.dim() == 1:
+                    is_multimodal = is_multimodal.unsqueeze(0)
+                elif is_multimodal.shape[0] > batch_size:
+                    is_multimodal = is_multimodal[:batch_size]
 
         # Check if input_ids already has expanded placeholders
         image_token_mask = input_ids == image_token_id
@@ -2350,6 +2364,8 @@ class OpenCUA_VLForConditionalGeneration(
             # Find first occurrence of each placeholder group using is_multimodal
             compressed_input_ids = torch.zeros_like(input_ids)
             for batch_idx in range(batch_size):
+                if batch_idx >= is_multimodal.shape[0]:
+                    continue
                 batch_is_multimodal = is_multimodal[batch_idx]
                 multimodal_indices = torch.where(batch_is_multimodal)[0]
                 if len(multimodal_indices) > 0:
@@ -2361,7 +2377,8 @@ class OpenCUA_VLForConditionalGeneration(
                     # Take first num_expected_placeholders group starts
                     keep_positions = group_starts[:num_expected_placeholders]
                     for pos in keep_positions:
-                        compressed_input_ids[batch_idx, pos] = image_token_id
+                        if pos < input_ids.shape[1]:
+                            compressed_input_ids[batch_idx, pos] = image_token_id
             input_ids_for_merge = compressed_input_ids
         else:
             input_ids_for_merge = input_ids
