@@ -2156,6 +2156,28 @@ class OpenCUA_VLForConditionalGeneration(
         _, embed_dim = image_features.shape
         batch_size, sequence_length = input_ids.shape
 
+        # Verify inputs_embeds shape matches expected
+        if inputs_embeds.dim() != 3:
+            raise ValueError(
+                f"inputs_embeds must be 3D (batch_size, seq_len, embed_dim), "
+                f"got {inputs_embeds.dim()}D with shape {inputs_embeds.shape}"
+            )
+        if inputs_embeds.shape[0] != batch_size:
+            raise ValueError(
+                f"inputs_embeds batch size {inputs_embeds.shape[0]} "
+                f"!= input_ids batch size {batch_size}"
+            )
+        if inputs_embeds.shape[1] != sequence_length:
+            raise ValueError(
+                f"inputs_embeds seq_len {inputs_embeds.shape[1]} "
+                f"!= input_ids seq_len {sequence_length}"
+            )
+        if inputs_embeds.shape[2] != embed_dim:
+            raise ValueError(
+                f"inputs_embeds embed_dim {inputs_embeds.shape[2]} "
+                f"!= image_features embed_dim {embed_dim}"
+            )
+
         # Check if left padding (pad tokens at the start)
         # HF checks first token, not last token
         # If first token is pad, it's left padding
@@ -2250,12 +2272,11 @@ class OpenCUA_VLForConditionalGeneration(
         attention_mask = attention_mask.to(target_device)
 
         # 4. Fill the embeddings based on the mask.
-        # inputs_embeds is (batch_size, sequence_length, embed_dim)
-        # batch_indices and non_image_indices are 1D tensors from torch.where
-        # We need to index correctly: inputs_embeds[batch_indices, non_image_indices]
-        # This should give us (num_text_tokens, embed_dim)
-        text_embeds = inputs_embeds[batch_indices, non_image_indices]
-        final_embedding[batch_indices, text_to_overwrite] = text_embeds
+        # HF implementation: inputs_embeds[batch_indices, non_image_indices]
+        # gives (num_text_tokens, embed_dim)
+        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
+            batch_indices, non_image_indices
+        ]
         final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[
             batch_indices, non_image_indices
         ]
@@ -2371,14 +2392,19 @@ class OpenCUA_VLForConditionalGeneration(
             logger.info("OpenCUA get_input_embeddings: no is_multimodal mask")
 
         # Get text embeddings first
-        # For HF-style merge, we need full embeddings (not masked)
-        # So we use handle_oov_mm_token=False to get complete embeddings
-        inputs_embeds = self._get_text_embeddings(
-            input_ids,
-            self.get_language_model().get_input_embeddings,
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=False,  # Need full embeddings for HF merge
-        )
+        # For HF-style merge, we need full embeddings for all tokens
+        # Use the language model's get_input_embeddings directly
+        # to ensure we get (batch_size, seq_len, embed_dim) shape
+        lm = self.get_language_model()
+        inputs_embeds = lm.get_input_embeddings(input_ids)
+
+        # Verify shape
+        if inputs_embeds.dim() != 3:
+            raise ValueError(
+                f"Language model get_input_embeddings returned "
+                f"{inputs_embeds.dim()}D tensor with shape {inputs_embeds.shape}, "
+                f"expected 3D (batch_size, seq_len, embed_dim)"
+            )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
