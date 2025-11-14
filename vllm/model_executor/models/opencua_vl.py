@@ -1846,8 +1846,32 @@ class OpenCUA_VLForConditionalGeneration(
         # Flatten multimodal embeddings
         from vllm.model_executor.models.utils import _flatten_embeddings
         
+        # Debug: log multimodal_embeddings structure
+        logger.info(
+            "OpenCUA get_input_embeddings - multimodal_embeddings: "
+            "type=%s, len=%d",
+            type(multimodal_embeddings),
+            len(multimodal_embeddings) if multimodal_embeddings else 0,
+        )
+        if multimodal_embeddings:
+            for i, emb in enumerate(multimodal_embeddings):
+                logger.info(
+                    "OpenCUA get_input_embeddings - multimodal_embeddings[%d]: "
+                    "type=%s, shape=%s",
+                    i,
+                    type(emb),
+                    emb.shape if hasattr(emb, "shape") else "N/A",
+                )
+        
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
         num_mm_tokens = mm_embeds_flat.shape[0]
+        
+        logger.info(
+            "OpenCUA get_input_embeddings - after flatten: "
+            "mm_embeds_flat.shape=%s, num_mm_tokens=%d",
+            mm_embeds_flat.shape,
+            num_mm_tokens,
+        )
         
         # Get text embeddings (excluding placeholder tokens)
         # Use handle_oov_mm_token=True to skip placeholder tokens
