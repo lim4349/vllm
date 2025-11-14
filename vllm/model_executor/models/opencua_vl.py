@@ -2129,25 +2129,27 @@ class OpenCUA_VLForConditionalGeneration(
         """
         Merge image features into input embeddings, expanding image tokens.
 
-        This implementation follows HuggingFace's approach for OpenCUA:
-        - Each image token is expanded to feature_lengths tokens
-        - Text token positions are recalculated
-        - Final sequence length is expanded
+        This implementation follows HuggingFace's
+        OpenCUAForConditionalGeneration._merge_input_ids_with_image_features
+        method exactly:
+        - Each image placeholder token is expanded to feature_lengths tokens
+        - Text token positions are recalculated using cumulative sum
+        - Final sequence length is expanded to accommodate image features
+        - Position IDs are computed using 1D sequential positions (not M-RoPE)
 
         Args:
-            image_features: Image features of shape
-                (num_image_tokens, embed_dim)
+            image_features: Image features of shape (num_image_tokens, embed_dim)
             feature_lengths: Length of each image feature sequence
             inputs_embeds: Input embeddings of shape
                 (batch_size, sequence_length, embed_dim)
             input_ids: Input IDs of shape (batch_size, sequence_length)
-            attention_mask: Attention mask of shape
-                (batch_size, sequence_length)
+            attention_mask: Attention mask of shape (batch_size, sequence_length)
             labels: Labels of shape (batch_size, sequence_length), optional
 
         Returns:
-            Tuple of (final_embedding, final_attention_mask,
-            final_labels, position_ids)
+            Tuple of (final_embedding, final_attention_mask, final_labels,
+            position_ids) where position_ids uses 1D sequential positions for
+            OpenCUA compatibility.
         """
         image_token_index: int = self.config.media_placeholder_token_id
         pad_token_id: int = self.config.pad_token_id
@@ -2179,23 +2181,15 @@ class OpenCUA_VLForConditionalGeneration(
             )
 
         # Check if left padding (pad tokens at the start)
-        # HF checks first token, not last token
-        # If first token is pad, it's left padding
-        first_token_is_pad = (
-            input_ids[:, 0] == torch.tensor(pad_token_id, device=input_ids.device)
-        ).any()
-        left_padding = (
-            first_token_is_pad.item()
-            if isinstance(first_token_is_pad, torch.Tensor)
-            else first_token_is_pad
-        )
+        # HuggingFace checks if any batch has padding at the start
+        left_padding = (input_ids[:, 0] == pad_token_id).any().item()
 
         # 1. Create a mask to know where special image tokens are
         # CRITICAL: This function expects original placeholders (1 per image).
         # If input_ids already has expanded placeholders, this function should
         # not be called (use vLLM generic merge instead).
-        _token_occupation_table = torch.ones_like(input_ids.flatten())
-        image_token_mask = input_ids.flatten() == image_token_index
+        _token_occupation_table = torch.ones_like(input_ids, dtype=torch.long)
+        image_token_mask = input_ids == image_token_index
 
         # Count how many placeholders we have in input_ids
         num_placeholders_in_input = image_token_mask.sum().item()
@@ -2211,14 +2205,18 @@ class OpenCUA_VLForConditionalGeneration(
             )
 
         # Assign feature_lengths to each placeholder position sequentially
-        placeholder_positions = torch.where(image_token_mask)[0]
-        for idx, pos in enumerate(placeholder_positions):
-            if idx < len(feature_lengths):
-                _token_occupation_table[pos] = feature_lengths[idx]
+        # Process batch by batch to maintain order
+        feature_idx = 0
+        for batch_idx in range(batch_size):
+            batch_placeholder_positions = torch.where(image_token_mask[batch_idx])[0]
+            for pos in batch_placeholder_positions:
+                if feature_idx < len(feature_lengths):
+                    _token_occupation_table[batch_idx, pos] = feature_lengths[
+                        feature_idx
+                    ]
+                    feature_idx += 1
 
-        _token_occupation_table = _token_occupation_table.reshape(input_ids.shape)
-
-        max_embed_dim = _token_occupation_table.sum(-1).max().item()
+        max_embed_dim = _token_occupation_table.sum(dim=-1).max().item()
         assert max_embed_dim >= sequence_length, (
             f"The maximum embedding dimension ({max_embed_dim}) is less than "
             f"the sequence length ({sequence_length})"
@@ -2228,11 +2226,11 @@ class OpenCUA_VLForConditionalGeneration(
 
         # 2. Compute the positions where text should be written
         # Calculate new positions for text tokens in merged image-text sequence.
-        new_token_positions = torch.cumsum(_token_occupation_table, -1) - 1
+        new_token_positions = torch.cumsum(_token_occupation_table, dim=-1) - 1
         nb_image_pad = max_embed_dim - 1 - new_token_positions[:, -1]
 
         if left_padding:
-            new_token_positions += nb_image_pad[:, None]  # offset for left padding
+            new_token_positions = new_token_positions + nb_image_pad.unsqueeze(-1)
 
         text_to_overwrite = new_token_positions[batch_indices, non_image_indices]
 
@@ -2294,9 +2292,10 @@ class OpenCUA_VLForConditionalGeneration(
             device=inputs_embeds.device,
         )
         image_to_overwrite[batch_indices, text_to_overwrite] = False
-        image_to_overwrite &= image_to_overwrite.cumsum(-1) - 1 >= nb_image_pad[
-            :, None
-        ].to(target_device)
+        nb_image_pad_expanded = nb_image_pad.unsqueeze(-1).to(target_device)
+        image_to_overwrite = image_to_overwrite & (
+            image_to_overwrite.cumsum(dim=-1) - 1 >= nb_image_pad_expanded
+        )
 
         num_image_tokens = image_to_overwrite.sum()
         num_image_features = image_features.shape[:-1].numel()
@@ -2314,7 +2313,7 @@ class OpenCUA_VLForConditionalGeneration(
         )
         final_attention_mask |= image_to_overwrite
 
-        position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_(
+        position_ids = (final_attention_mask.cumsum(dim=-1) - 1).masked_fill_(
             (final_attention_mask == 0), 1
         )
 
@@ -2334,7 +2333,16 @@ class OpenCUA_VLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        """Override to use custom image feature merging logic."""
+        """
+        Get input embeddings with image features merged.
+
+        This follows HuggingFace's OpenCUAForConditionalGeneration.
+        get_input_embeddings:
+        - Merges image features into text embeddings using
+          _merge_input_ids_with_image_features
+        - Computes position_ids using 1D sequential positions
+        - Caches position_ids for use in forward pass
+        """
         # Force output to file for debugging (stderr might be redirected)
         import os
 
@@ -2418,9 +2426,6 @@ class OpenCUA_VLForConditionalGeneration(
 
         # Use HF-style merge following OpenCUA official implementation
         # https://huggingface.co/xlangai/OpenCUA-7B/blob/main/modeling_opencua.py
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
         from vllm.model_executor.models.utils import _flatten_embeddings
 
         image_features_flat = _flatten_embeddings(multimodal_embeddings)
@@ -2527,10 +2532,16 @@ class OpenCUA_VLForConditionalGeneration(
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """
-        OpenCUA custom forward with HF-style merge.
+        Forward pass for OpenCUA model.
 
-        MINIMAL PATCH: Merge is done in get_input_embeddings,
-        forward just uses standard vLLM flow.
+        This implementation follows HuggingFace's
+        OpenCUAForConditionalGeneration.forward:
+        - Image features are merged with text embeddings in get_input_embeddings
+        - Position IDs are computed using 1D sequential positions (not M-RoPE)
+        - Forward pass uses the merged embeddings and position IDs
+
+        For vLLM inference, merge is done in get_input_embeddings,
+        and forward uses the standard vLLM flow with cached position_ids.
         """
         # Force output to file for debugging (stderr might be redirected)
         import os
