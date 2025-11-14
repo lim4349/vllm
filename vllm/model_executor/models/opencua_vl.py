@@ -2169,12 +2169,8 @@ class OpenCUA_VLForConditionalGeneration(
         lm = self.get_language_model()
         inputs_embeds = lm.get_input_embeddings(input_ids)
 
-        if inputs_embeds.dim() != 3:
-            raise ValueError(
-                f"Language model get_input_embeddings returned "
-                f"{inputs_embeds.dim()}D tensor with shape {inputs_embeds.shape}, "
-                f"expected 3D (batch_size, seq_len, embed_dim)"
-            )
+        if inputs_embeds.dim() == 2:
+            inputs_embeds = inputs_embeds.unsqueeze(0)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
