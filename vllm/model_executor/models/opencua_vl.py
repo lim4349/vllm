@@ -2030,9 +2030,11 @@ class OpenCUA_VLForConditionalGeneration(
             # HuggingFace implementation uses sequential position_ids, not 3D MRoPE
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
             
-            # Visual tokens start after text_len tokens
+            # Visual tokens replace the placeholder token at position ed
+            # So visual tokens start at position st_idx + text_len
+            # (which equals ed in the original sequence)
             # Sequential positions: [start, start+1, ..., start+num_visual_tokens-1]
-            visual_start_pos = text_len + st_idx
+            visual_start_pos = st_idx + text_len
             visual_positions = (
                 torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
@@ -2051,20 +2053,25 @@ class OpenCUA_VLForConditionalGeneration(
 
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
+            # num_visual_tokens tokens in the actual sequence.
+            # But in input_tokens, we still have the placeholder, so we need to
+            # skip it (ed + 1) to find the next placeholder.
+            # The st_idx for positions is automatically updated by
+            # llm_pos_ids_list[-1].max() + 1 in the next iteration.
             
             # Logging
             logger.info(
                 "OpenCUA 1D RoPE update st - ed: %d, num_visual_tokens: %d, "
-                "st before: %d, st after: %d",
+                "st before: %d, st after: %d, next st_idx will be: %d",
                 ed,
                 num_visual_tokens,
                 st,
-                ed + num_visual_tokens,
+                ed + 1,
+                visual_positions.max().item() + 1,
             )
             
-            st = ed + num_visual_tokens
+            # In input_tokens, skip the placeholder at ed to find next placeholder
+            st = ed + 1
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
