@@ -1810,10 +1810,11 @@ class OpenCUA_VLForConditionalGeneration(
         logger = init_logger(__name__)
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
-            "inputs_embeds shape: %s",
+            "inputs_embeds shape: %s, positions (first 10): %s",
             input_ids.shape if input_ids is not None else None,
             positions.shape,
             inputs_embeds.shape if inputs_embeds is not None else None,
+            positions[:10].tolist() if len(positions) > 0 else [],
         )
 
         if intermediate_tensors is not None:
@@ -1857,11 +1858,14 @@ class OpenCUA_VLForConditionalGeneration(
         """
         logger = init_logger(__name__)
         logger.info(
-            "OpenCUA get_mrope_input_positions called - input_tokens len: %d, "
-            "image_grid_thw: %s, video_grid_thw: %s",
+            "=== OpenCUA get_mrope_input_positions CALLED === - "
+            "input_tokens len: %d, image_grid_thw: %s, video_grid_thw: %s, "
+            "context_len: %d, seq_len: %s",
             len(input_tokens),
             image_grid_thw,
             video_grid_thw,
+            context_len,
+            seq_len,
         )
         if image_grid_thw is None:
             image_grid_thw = []
