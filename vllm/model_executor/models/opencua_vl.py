@@ -571,22 +571,19 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
+        # OpenCUA uses 1D RoPE, so vision transformer output is
+        # already in 1D order. Use simple reshape like Qwen2.5-VL.
         x = self.ln_q(x)
-
-        # Reshape: [seq_len // spatial_merge_unit, 1, spatial_merge_unit, context_dim]
-        # -> [seq_len // spatial_merge_unit, spatial_merge_unit * context_dim]
-        # This merges spatial_merge_unit patches into one token
-        seq_len_merged, batch, spatial_merge_unit, context_dim = x.shape
-        x = x.view(seq_len_merged, batch, spatial_merge_unit * context_dim)
-        x = x.squeeze(
-            1
-        )  # Remove batch dimension: [seq_len_merged, spatial_merge_unit * context_dim]
-
-        # Verify hidden_size matches
-        assert x.shape[-1] == self.hidden_size, (
-            f"Merger input size {x.shape[-1]} != hidden_size {self.hidden_size}"
-        )
-
+        
+        # Qwen2.5-VL style: simple view reshape
+        # The vision transformer with 1D RoPE outputs patches in
+        # sequential order. We need to reshape to
+        # [num_merged_tokens, hidden_size] where
+        # hidden_size = context_dim * spatial_merge_size^2
+        # This groups spatial_merge_size^2 patches together
+        # Ensure contiguous memory layout for better performance
+        x = x.contiguous().view(-1, self.hidden_size)
+        
         out = self.mlp(x)
         return out
 
@@ -737,40 +734,15 @@ class OpenCUA_VisionTransformer(nn.Module):
 
     @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_1d(self, t, h, w):
-        """
-        Get 1D RoPE embeddings for OpenCUA.
-        Uses simple sequential positions (0, 1, 2, ...) without window attention.
-
-        Key difference from Qwen2.5-VL:
-        - Qwen2.5-VL: RoPE is applied after spatial merge (at token level)
-        - OpenCUA: RoPE is applied before spatial merge (at patch level)
-        """
-        # Total patches after patch_embed: t * h * w
+        # Vision transformer processes all patches after patch_embed
+        # Total patches = t * h * w (not t * llm_grid_h * llm_grid_w)
+        # For 1D RoPE, we need position embeddings for each patch in sequence order
         total_patches = t * h * w
-
-        # Calculate tokens after spatial merge
-        llm_grid_h = h // self.spatial_merge_size
-        llm_grid_w = w // self.spatial_merge_size
-        total_tokens = t * llm_grid_h * llm_grid_w
-
-        # Generate 1D RoPE for patches in sequential order
-        # Shape: [total_patches, rotary_dim // 2]
         rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_patches)
-
-        # Reshape for spatial merge: group spatial_merge_unit patches together
-        # Shape: [total_tokens, spatial_merge_unit, rotary_dim // 2]
-        rotary_pos_emb_1d = rotary_pos_emb_1d.view(
-            total_tokens, self.spatial_merge_unit, -1
-        )
-        # Flatten: [total_patches, rotary_dim // 2]
-        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
-
-        # cu_seqlens: cumulative sequence lengths for each image/frame
-        # Use patch count (before merge) for attention
-        cu_seqlens_1d = torch.repeat_interleave(
-            torch.tensor([h * w], dtype=torch.int32), t
-        )
-
+        # rotary_pos_emb_1d shape: [total_patches, rotary_dim // 2]
+        # cu_seqlens_1d should represent the sequence length after patch_embed,
+        # which is t * h * w (total patches across all frames)
+        cu_seqlens_1d = torch.tensor([total_patches], dtype=torch.int32)
         return rotary_pos_emb_1d, cu_seqlens_1d
 
     def compute_attn_mask_seqlen(
@@ -810,12 +782,19 @@ class OpenCUA_VisionTransformer(nn.Module):
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
-        # Build 1D RoPE and sequence lengths for each image/video
-        # No window attention - just sequential order
+        logger = init_logger(__name__)
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
-
             rotary_pos_emb_1d, cu_seqlens_1d = self.get_rope_by_1d(t, h, w)
+            
+            # Logging
+            logger.info(
+                "OpenCUA VisionTransformer 1D RoPE - grid_thw: [%d, %d, %d], "
+                "rotary_pos_emb_1d shape: %s, cu_seqlens_1d: %s",
+                t, h, w,
+                str(rotary_pos_emb_1d.shape),
+                str(cu_seqlens_1d),
+            )
 
             rotary_pos_emb.append(rotary_pos_emb_1d)
             cu_seqlens.append(cu_seqlens_1d)
@@ -824,53 +803,45 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
-
-        # Pre-compute seqlens for attention backends
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
-
-        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-
-        # Reshape for spatial merge (like Qwen2.5-VL, but no window reordering)
-        # Shape: [total_patches, hidden_size] ->
-        # [total_patches // spatial_merge_unit, spatial_merge_unit, hidden_size]
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        
+        # Logging
+        logger.info(
+            "OpenCUA VisionTransformer - rotary_pos_emb shape: %s, "
+            "cu_seqlens: %s, hidden_states shape: %s",
+            str(rotary_pos_emb.shape),
+            str(cu_seqlens),
+            str(hidden_states.shape),
         )
-        # Reshape back to [total_patches, hidden_size] for attention
-        # (no window reordering, so just flatten)
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        hidden_states = hidden_states.unsqueeze(1)
 
-        # All layers use full attention (no window attention)
-        # cu_seqlens and rotary_pos_emb are at patch level
-        for blk in self.blocks:
+        hidden_states = hidden_states.unsqueeze(1)
+        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
+        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+
+        for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
-                max_seqlen=max_seqlen,
-                seqlens=seqlens,
+                max_seqlen=max_seqlen_full,
+                seqlens=seqlens_full,
             )
 
-        # After blocks, reshape for spatial merge (merger expects grouped patches)
-        # Shape: [total_patches, 1, hidden_size] ->
-        # [total_patches // spatial_merge_unit, 1, spatial_merge_unit, hidden_size]
-        seq_len_after_blocks = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(
-            seq_len_after_blocks // self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            -1,
-        )
-        hidden_states = hidden_states.unsqueeze(1)
-
-        # For Qwen2.5-VL-3B, float16 will overflow at last block
-        # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)
 
-        # adapter
-        hidden_states = self.merger(hidden_states)
+        # Squeeze batch dimension before merger
+        # [seq_len, 1, context_dim] -> [seq_len, context_dim]
+        hidden_states = hidden_states.squeeze(1)
+        hidden_states = self.merger(hidden_states, grid_thw=grid_thw)
+        
+        # Logging
+        logger.info(
+            "OpenCUA VisionTransformer output - shape: %s, dtype: %s",
+            str(hidden_states.shape),
+            str(hidden_states.dtype),
+        )
+        
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -2046,105 +2017,86 @@ class OpenCUA_VLForConditionalGeneration(
                 st_idx,
             )
             if text_len > 0:
-                # OpenCUA uses 1D sequential position_ids for LLM
-                # (not 3D MRoPE coordinates)
-                text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
+                text_positions = (
+                    torch.arange(text_len)
+                    .view(1, -1)
+                    .expand(3, -1)
+                    + st_idx
+                )
                 llm_pos_ids_list.append(text_positions)
 
-            # OpenCUA uses 1D RoPE for both vision transformer and language model
-            # Generate 1D sequential positions for visual tokens
-            # Visual tokens start after text_len tokens
+            # OpenCUA uses 1D RoPE for vision transformer, but language model
+            # MRoPE still expects 3D positions. Generate proper 3D positions
+            # for visual tokens (t, h, w dimensions)
+            t_index = (
+                torch.arange(llm_grid_t)
+                .view(-1, 1)
+                .expand(-1, llm_grid_h * llm_grid_w)
+                .flatten()
+            )
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
+            # visual_positions start after text_len tokens
+            # This matches Qwen2.5-VL logic: visual_positions = positions + text_len + st_idx
+            num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            
+            # Calculate the starting position for visual tokens
+            # After text positions, visual tokens start at text_len + st_idx
             visual_start_pos = text_len + st_idx
-            # Sequential positions for visual tokens:
-            # [start, start+1, ..., start+num_visual_tokens-1]
             visual_positions = (
-                torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
+                torch.stack([t_index, h_index, w_index]) + visual_start_pos
             )
 
             # Logging
             logger.info(
                 "OpenCUA MRoPE visual - visual_positions shape: %s, "
                 "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
-                "visual_start_pos: %d",
+                "visual_start_pos: %d, t_index max: %d, "
+                "h_index max: %d, w_index max: %d, "
+                "visual_positions[0] max: %d, "
+                "visual_positions[1] max: %d, visual_positions[2] max: %d",
                 str(visual_positions.shape),
                 visual_positions.min().item(),
                 visual_positions.max().item(),
                 num_visual_tokens,
                 visual_start_pos,
+                t_index.max().item(),
+                h_index.max().item(),
+                w_index.max().item(),
+                visual_positions[0].max().item(),
+                visual_positions[1].max().item(),
+                visual_positions[2].max().item(),
             )
 
             llm_pos_ids_list.append(visual_positions)
             # After replacement, the placeholder token at position ed is replaced with
             # num_visual_tokens tokens. The next text starts after these visual tokens.
-            # Since we now keep only 1 placeholder in template, we advance st by
-            # ed + num_visual_tokens (the placeholder at ed is replaced with
-            # num_visual_tokens vision embeddings)
-
-            # Logging: st update validation
-            # For single image case, verify st update matches replacement count
-            st_before = st
-            # st should advance past the placeholder (at ed) and the visual tokens
-            # The placeholder at position ed is replaced with num_visual_tokens
-            # vision embeddings, so st = ed + num_visual_tokens
-            st_after = ed + num_visual_tokens
-
-            # Calculate text length and placeholder count
-            # text_len = ed - st_before is the number of text tokens before placeholder
-            # placeholder_count = 1 (there's exactly 1 placeholder at position ed)
-            text_len_before_placeholder = ed - st_before
-            placeholder_count = 1  # Each image/video has exactly 1 placeholder in text
-            st_advance = st_after - ed  # How many tokens st advances past placeholder
-
+            # This matches Qwen2.5-VL logic: st = ed + num_visual_tokens
+            
+            # Logging
             logger.info(
                 "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
-                "st before: %d, st after: %d, "
-                "text_len_before_placeholder: %d, "
-                "placeholder_count: %d (should be 1), "
-                "st_advance (st_after - ed): %d "
-                "(should equal num_visual_tokens: %d)",
-                ed,
-                num_visual_tokens,
-                st_before,
-                st_after,
-                text_len_before_placeholder,
-                placeholder_count,
-                st_advance,
-                num_visual_tokens,
+                "st before: %d, st after: %d",
+                ed, num_visual_tokens, st, ed + num_visual_tokens,
             )
-
-            # Validation: For single image case, verify st update logic
-            if image_nums == 1 and video_nums == 0:
-                if placeholder_count != 1:
-                    logger.warning(
-                        "Single image case: placeholder_count = %d "
-                        "(expected 1 for single placeholder)",
-                        placeholder_count,
-                    )
-                if st_advance != num_visual_tokens:
-                    raise ValueError(
-                        f"Single image case: st update mismatch. "
-                        f"st_advance = {st_advance}, but num_visual_tokens = "
-                        f"{num_visual_tokens}. This indicates incorrect "
-                        f"st update logic."
-                    )
-                logger.info(
-                    "Single image case validation - text_len_before_placeholder: %d, "
-                    "placeholder_count: %d, st_advance: %d, num_visual_tokens: %d, "
-                    "st_advance_match: %s",
-                    text_len_before_placeholder,
-                    placeholder_count,
-                    st_advance,
-                    num_visual_tokens,
-                    st_advance == num_visual_tokens,
-                )
-
-            st = st_after
+            
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
-
+            text_positions = torch.arange(text_len) + st_idx
+            
             # Logging
             logger.info(
                 "OpenCUA MRoPE remaining text - st: %d, len(input_tokens): %d, "
@@ -2156,46 +2108,32 @@ class OpenCUA_VLForConditionalGeneration(
                 text_positions.min().item(),
                 text_positions.max().item(),
             )
+            
+            llm_pos_ids_list.append(
+                text_positions.view(1, -1).expand(3, -1)
+            )
 
-            llm_pos_ids_list.append(text_positions)
-
-        # Concatenate all 1D position_ids
-        llm_positions_1d = torch.cat(llm_pos_ids_list, dim=0)
-
-        # Logging before slicing
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        
+        # Logging before calculating delta
         logger.info(
-            "OpenCUA MRoPE before slice - llm_positions_1d shape: %s, "
-            "llm_positions_1d.max(): %d, input_tokens len: %d",
-            str(llm_positions_1d.shape),
-            llm_positions_1d.max().item(),
-            len(input_tokens),
-        )
-
-        # OpenCUA uses 1D sequential position_ids
-        # Slice according to context_len and seq_len if provided
-        if seq_len is not None:
-            llm_positions_1d = llm_positions_1d[context_len:seq_len]
-        elif context_len > 0:
-            llm_positions_1d = llm_positions_1d[context_len:]
-
-        # vLLM expects mrope_positions to be (3, L) shape for MRoPE interface
-        # For OpenCUA, we use 1D sequential positions, so we repeat the same
-        # 1D positions 3 times to match the expected shape
-        # This allows vLLM to use positions[0] (or any row) as the actual position_ids
-        llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
-
-        # For compatibility with vLLM interface, return delta = 0
-        # (positions are already correct, no adjustment needed)
-        mrope_position_delta = 0
-
-        # Logging
-        logger.info(
-            "OpenCUA MRoPE final - llm_positions_1d shape: %s, "
-            "llm_positions shape: %s, llm_positions.max(): %d, "
-            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
-            str(llm_positions_1d.shape),
+            "OpenCUA MRoPE before delta - llm_positions shape: %s, "
+            "llm_positions.max(): %d, input_tokens len: %d",
             str(llm_positions.shape),
             llm_positions.max().item(),
+            len(input_tokens),
+        )
+        
+        # mrope_position_delta calculation matches Qwen2.5-VL
+        # This represents the difference between the maximum position and the input length
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        llm_positions = llm_positions[:, context_len:seq_len]
+        
+        # Logging
+        logger.info(
+            "OpenCUA MRoPE final - llm_positions shape: %s, "
+            "mrope_position_delta: %d, context_len: %d, seq_len: %s",
+            str(llm_positions.shape),
             mrope_position_delta,
             context_len,
             seq_len,
