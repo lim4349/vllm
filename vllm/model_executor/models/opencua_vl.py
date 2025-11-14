@@ -2164,6 +2164,34 @@ class OpenCUA_VLForConditionalGeneration(
         _, embed_dim = image_features.shape
         batch_size, sequence_length = input_ids.shape
 
+        # Ensure inputs_embeds has correct shape (batch_size, seq_len, embed_dim)
+        if inputs_embeds.dim() == 2:
+            # If 2D, assume it's (seq_len, embed_dim) and add batch dimension
+            inputs_embeds = inputs_embeds.unsqueeze(0)
+            if inputs_embeds.shape[0] != batch_size:
+                # Broadcast if needed
+                if inputs_embeds.shape[0] == 1:
+                    inputs_embeds = inputs_embeds.expand(batch_size, -1, -1)
+                else:
+                    batch_size = inputs_embeds.shape[0]
+        elif inputs_embeds.dim() == 1:
+            raise ValueError(
+                f"inputs_embeds has unexpected 1D shape {inputs_embeds.shape}. "
+                f"Expected (batch_size, seq_len, embed_dim) or (seq_len, embed_dim)"
+            )
+
+        # Verify inputs_embeds shape matches input_ids
+        if inputs_embeds.shape[0] != batch_size:
+            raise ValueError(
+                f"inputs_embeds batch size {inputs_embeds.shape[0]} "
+                f"does not match input_ids batch size {batch_size}"
+            )
+        if inputs_embeds.shape[1] != sequence_length:
+            raise ValueError(
+                f"inputs_embeds sequence length {inputs_embeds.shape[1]} "
+                f"does not match input_ids sequence length {sequence_length}"
+            )
+
         # Check if left padding (pad tokens at the start)
         # HF checks first token, not last token
         # If first token is pad, it's left padding
@@ -2386,6 +2414,28 @@ class OpenCUA_VLForConditionalGeneration(
         attention_mask = torch.ones(
             batch_size, sequence_length, dtype=torch.bool, device=inputs_embeds.device
         )
+
+        # Ensure inputs_embeds has correct shape (batch_size, seq_len, embed_dim)
+        if inputs_embeds.dim() == 2:
+            # If 2D, assume it's (seq_len, embed_dim) and add batch dimension
+            inputs_embeds = inputs_embeds.unsqueeze(0)
+        elif inputs_embeds.dim() == 1:
+            # If 1D, this is unexpected - try to reshape
+            # This shouldn't happen, but handle it gracefully
+            embed_dim = (
+                inputs_embeds.shape[-1]
+                if inputs_embeds.numel() > 0
+                else self.config.hidden_size
+            )
+            inputs_embeds = inputs_embeds.reshape(1, -1, embed_dim)
+
+        # Ensure batch_size matches
+        if inputs_embeds.shape[0] != batch_size:
+            if inputs_embeds.shape[0] == 1 and batch_size > 1:
+                # Broadcast single batch to multiple batches
+                inputs_embeds = inputs_embeds.expand(batch_size, -1, -1)
+            else:
+                batch_size = inputs_embeds.shape[0]
 
         (
             final_embedding,
