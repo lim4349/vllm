@@ -13,7 +13,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoImageProcessor, BatchFeature
+from transformers import AutoImageProcessor, AutoProcessor, BatchFeature
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -765,6 +765,12 @@ class OpenCUAVisionTransformer(nn.Module):
 
 
 class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache processor to avoid multiple reloads
+        self._cached_processor: object | None = None
+        self._cached_processor_path: str | None = None
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(OpenCUA_VLConfig)
 
@@ -775,8 +781,19 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
         based on the model's config, handling TikTokenV3 tokenizer correctly.
         Uses cached processor to avoid multiple reloads.
         """
+        model_path = self.ctx.model_config.model
+        use_fast = kwargs.pop("use_fast", True)
+
         # Use cached processor to avoid multiple reloads
-        return self.ctx.get_hf_processor(**kwargs)
+        if self._cached_processor is None or self._cached_processor_path != model_path:
+            self._cached_processor = AutoProcessor.from_pretrained(
+                model_path,
+                use_fast=use_fast,
+                trust_remote_code=True,
+            )
+            self._cached_processor_path = model_path
+
+        return self._cached_processor
 
     def get_image_processor(self, **kwargs: object):
         """
