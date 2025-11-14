@@ -1820,13 +1820,52 @@ class OpenCUA_VLForConditionalGeneration(
         Forward pass through language model.
         """
         logger = init_logger(__name__)
+        
+        # For multimodal models, positions may be shorter than inputs_embeds
+        # because scheduler only counts text tokens. Expand positions to match
+        # inputs_embeds length (which includes visual tokens).
+        if inputs_embeds is not None and positions.shape[-1] < inputs_embeds.shape[0]:
+            # positions is (3, L) where L < inputs_embeds.shape[0]
+            # Expand to match inputs_embeds length using 1D sequential positions
+            current_len = positions.shape[-1]
+            target_len = inputs_embeds.shape[0]
+            
+            # Get the last position value from each dimension
+            last_positions = positions[:, -1:]  # (3, 1)
+            
+            # Generate sequential positions for the remaining tokens
+            # For 1D RoPE, all 3 dimensions should have the same values
+            remaining_len = target_len - current_len
+            if remaining_len > 0:
+                # Create sequential positions starting from last position + 1
+                start_pos = last_positions[0, 0].item() + 1
+                new_positions_1d = torch.arange(
+                    start_pos,
+                    start_pos + remaining_len,
+                    dtype=positions.dtype,
+                    device=positions.device,
+                )
+                # Expand to (3, remaining_len) for MRoPE interface
+                new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
+                
+                # Concatenate with existing positions
+                positions = torch.cat([positions, new_positions], dim=-1)
+                
+                logger.info(
+                    "OpenCUA forward - expanded positions from %d to %d "
+                    "(added %d visual token positions)",
+                    current_len,
+                    target_len,
+                    remaining_len,
+                )
+        
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
             "inputs_embeds shape: %s, positions (first 10): %s",
             input_ids.shape if input_ids is not None else None,
             positions.shape,
             inputs_embeds.shape if inputs_embeds is not None else None,
-            positions[:10].tolist() if len(positions) > 0 else [],
+            positions[:, :10].tolist() if positions.shape[-1] > 0 else [],
         )
 
         if intermediate_tensors is not None:
