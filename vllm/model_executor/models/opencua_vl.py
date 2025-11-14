@@ -571,24 +571,21 @@ class OpenCUA_VisionPatchMerger(nn.Module):
     def forward(
         self, x: torch.Tensor, grid_thw: list[list[int]] | None = None
     ) -> torch.Tensor:
-        # OpenCUA uses 1D RoPE, so vision transformer output is
-        # already in 1D order. Use simple reshape like Qwen2.5-VL.
-        # Input shape: [seq_len, 1, context_dim]
-        # LayerNorm normalizes over the last dimension,
-        # so it handles 3D tensors correctly
         x = self.ln_q(x)
 
-        # Qwen2.5-VL style: simple view reshape
-        # The vision transformer with 1D RoPE outputs patches in
-        # sequential order. We need to reshape to
-        # [num_merged_tokens, hidden_size] where
-        # hidden_size = context_dim * spatial_merge_size^2
-        # This groups spatial_merge_size^2 patches together
-        # view(-1, hidden_size) works on [seq_len, 1, context_dim]:
-        # total_elements = seq_len * 1 * context_dim
-        # num_merged_tokens = total_elements / hidden_size
-        # = seq_len / spatial_merge_size^2
-        x = x.view(-1, self.hidden_size)
+        # Reshape: [seq_len // spatial_merge_unit, 1, spatial_merge_unit, context_dim]
+        # -> [seq_len // spatial_merge_unit, spatial_merge_unit * context_dim]
+        # This merges spatial_merge_unit patches into one token
+        seq_len_merged, batch, spatial_merge_unit, context_dim = x.shape
+        x = x.view(seq_len_merged, batch, spatial_merge_unit * context_dim)
+        x = x.squeeze(
+            1
+        )  # Remove batch dimension: [seq_len_merged, spatial_merge_unit * context_dim]
+
+        # Verify hidden_size matches
+        assert x.shape[-1] == self.hidden_size, (
+            f"Merger input size {x.shape[-1]} != hidden_size {self.hidden_size}"
+        )
 
         out = self.mlp(x)
         return out
@@ -748,10 +745,13 @@ class OpenCUA_VisionTransformer(nn.Module):
         total_patches = t * h * w
 
         # Generate 1D RoPE for all patches in sequential order
+        # RoPE is applied before spatial merge, so we need RoPE for all patches
         rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_patches)
 
         # cu_seqlens: cumulative sequence lengths for each image/frame
-        # Each frame has h * w patches (before merge)
+        # After spatial merge, each frame has (h * w) // spatial_merge_unit tokens
+        # But for attention, we use the patch count before merge
+        # because RoPE is applied at patch level
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -816,15 +816,15 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
 
-        # Reshape for spatial merge (sequential order, no reordering needed)
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states.reshape(seq_len, -1)
-
+        # For 1D RoPE with full attention:
+        # - RoPE is applied at patch level (before spatial merge)
+        # - Attention operates on patches in sequential order
+        # - No window reordering needed
+        # Shape: [total_patches, hidden_size] -> [total_patches, 1, hidden_size]
         hidden_states = hidden_states.unsqueeze(1)
 
         # All layers use full attention (no window attention)
+        # cu_seqlens and rotary_pos_emb are at patch level
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
@@ -833,6 +833,17 @@ class OpenCUA_VisionTransformer(nn.Module):
                 max_seqlen=max_seqlen,
                 seqlens=seqlens,
             )
+
+        # After blocks, reshape for spatial merge
+        # Shape: [total_patches, 1, hidden_size] ->
+        # [total_patches // spatial_merge_unit, 1, spatial_merge_unit, hidden_size]
+        seq_len_after_blocks = hidden_states.shape[0]
+        hidden_states = hidden_states.reshape(
+            seq_len_after_blocks // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+        hidden_states = hidden_states.unsqueeze(1)
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.
