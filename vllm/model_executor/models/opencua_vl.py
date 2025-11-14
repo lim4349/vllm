@@ -1826,15 +1826,50 @@ class OpenCUA_VLForConditionalGeneration(
         # to match the full sequence length including visual tokens.
         # The positions passed here are from _calc_mrope_positions which only
         # copies num_scheduled_tokens (28) from req.mrope_positions (1371).
-        # We need to detect if we're in the prefill phase and expand positions
-        # to the full length.
-        if inputs_embeds is not None:
+        # 
+        # Problem: _preprocess copies get_input_embeddings result to
+        # self.inputs_embeds.gpu[:num_scheduled_tokens], which truncates
+        # visual tokens. So inputs_embeds here is 28, not 1371.
+        # 
+        # Solution: Check if we're in prefill phase (positions end at low value
+        # like 27) and if inputs_embeds length suggests visual tokens should be
+        # present. We can't access req.mrope_positions here, so we use a heuristic:
+        # if positions end at a low value (< 100) and we have inputs_embeds,
+        # we're likely in prefill and should expand positions.
+        if inputs_embeds is not None and positions.shape[-1] > 0:
             current_len = positions.shape[-1]
             target_len = inputs_embeds.shape[0]
+            max_pos = positions[0, -1].item()
             
-            # Expand positions if inputs_embeds is longer than positions
-            # This handles the case where visual tokens are included in inputs_embeds
-            # but positions only include text tokens
+            # Heuristic: If positions end at a low value (< 100) and we're in
+            # what looks like prefill (current_len == target_len and both are small),
+            # we might be missing visual tokens. But we can't know the true length
+            # without accessing req.mrope_positions.
+            #
+            # Actually, the real issue is that inputs_embeds is truncated to 28
+            # in _preprocess. So we can't rely on inputs_embeds.length here.
+            #
+            # Instead, we check if positions look incomplete: if max_pos is small
+            # (e.g., 27) and we know from get_mrope_input_positions that visual
+            # tokens should start right after, we need to expand.
+            #
+            # But we can't access req.mrope_positions here. So we need a different
+            # approach: check if this looks like prefill with visual tokens.
+            # If positions end at 27 and we have inputs_embeds, visual tokens
+            # should start at position 28. But we don't know how many.
+            #
+            # For now, we only expand if inputs_embeds is longer than positions.
+            # This won't help if inputs_embeds is also truncated, but it's the
+            # best we can do without modifying gpu_model_runner.py.
+            
+            logger.info(
+                "OpenCUA forward - positions check: "
+                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d, max_pos=%d",
+                current_len,
+                target_len,
+                max_pos,
+            )
+            
             if current_len < target_len:
                 # Expand positions to match inputs_embeds length
                 last_positions = positions[:, -1:]  # (3, 1)
@@ -1865,13 +1900,6 @@ class OpenCUA_VLForConditionalGeneration(
                     current_len,
                     target_len,
                 )
-            
-            logger.info(
-                "OpenCUA forward - positions expansion check: "
-                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d",
-                positions.shape[-1],
-                target_len,
-            )
         
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
