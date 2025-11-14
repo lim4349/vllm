@@ -50,7 +50,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.opencua_vl import OpenCUA_VLConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -64,6 +63,7 @@ from .interfaces import (
     SupportsQuant,
 )
 from .qwen2_vl import (
+    Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
     apply_rotary_pos_emb_vision,
@@ -929,43 +929,23 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
         return image_processor
 
 
-class OpenCUAVLDummyInputsBuilder(BaseDummyInputsBuilder[OpenCUAVLProcessingInfo]):
+class OpenCUAVLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     """Dummy inputs builder for OpenCUA model."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         """
         Get dummy text for OpenCUA model.
-        Uses image token directly from config or processor.
+        Uses Qwen2VL's approach but with OpenCUA's token.
         """
         num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
 
-        # Try to get image token from processor, fallback to config
-        try:
-            hf_processor = self.info.get_hf_processor()
-            # Check if processor has image_token attribute
-            if hasattr(hf_processor, "image_token"):
-                image_token: str = hf_processor.image_token
-            else:
-                # Fallback: use tokenizer to get image token
-                tokenizer = self.info.get_tokenizer()
-                # OpenCUA uses <|media_placeholder|> or similar
-                # Try common image token names
-                for token_name in [
-                    "<|media_placeholder|>",
-                    "<|image_pad|>",
-                    "<|image|>",
-                ]:
-                    if token_name in tokenizer.get_vocab():
-                        image_token = token_name
-                        break
-                else:
-                    # Default fallback
-                    image_token = "<|media_placeholder|>"
-        except Exception:
-            # Final fallback
-            image_token = "<|media_placeholder|>"
+        hf_processor = self.info.get_hf_processor()
+        # OpenCUA processor should have image_token set to <|media_placeholder|>
+        image_token: str = hf_processor.image_token
+        video_token: str = hf_processor.video_token
 
-        return image_token * num_images
+        return image_token * num_images + video_token * num_videos
 
     def get_dummy_mm_data(
         self,
