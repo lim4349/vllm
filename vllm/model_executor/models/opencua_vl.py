@@ -868,6 +868,9 @@ class OpenCUA_VLForConditionalGeneration(
             # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
             "model.visual.": "visual.",
+            # mapping for vision_tower (some checkpoints use this name)
+            "vision_tower.": "visual.",
+            "model.vision_tower.": "visual.",
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
