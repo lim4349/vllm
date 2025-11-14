@@ -1818,18 +1818,112 @@ class OpenCUA_VLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        """Override to track the actual length of embeddings including visual tokens."""
-        # Call parent's get_input_embeddings
-        result = super().get_input_embeddings(
-            input_ids=input_ids,
-            multimodal_embeddings=multimodal_embeddings,
+        """
+        Override to expand placeholder tokens to visual tokens.
+        
+        OpenCUA uses 1 placeholder token that expands to multiple visual tokens
+        (e.g., 1344 tokens). The default _merge_multimodal_embeddings only
+        replaces placeholders in-place, but we need to expand the sequence.
+        """
+        logger = init_logger(__name__)
+        
+        # If no multimodal embeddings, use parent's implementation
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return super().get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+                handle_oov_mm_token=handle_oov_mm_token,
+            )
+        
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229."
+            )
+        
+        # Flatten multimodal embeddings
+        from vllm.model_executor.models.utils import _flatten_embeddings
+        
+        mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+        num_mm_tokens = mm_embeds_flat.shape[0]
+        
+        # Get text embeddings (excluding placeholder tokens)
+        # Use handle_oov_mm_token=True to skip placeholder tokens
+        text_embeds = self._get_text_embeddings(
+            input_ids,
+            self.get_language_model().get_input_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
+            handle_oov_mm_token=True,  # Skip placeholder tokens
         )
         
+        # Find placeholder positions
+        is_mm_mask = is_multimodal.bool()
+        num_text_tokens = (~is_mm_mask).sum().item()
+        num_placeholders = is_mm_mask.sum().item()
+        
+        # Build expanded embeddings: text tokens + visual tokens
+        # For each placeholder, replace with visual tokens
+        result_parts = []
+        text_idx = 0
+        mm_embed_idx = 0
+        
+        for i in range(input_ids.shape[0]):
+            if is_mm_mask[i]:
+                # Placeholder: insert visual tokens
+                # Count how many visual tokens belong to this placeholder
+                # In OpenCUA, each placeholder expands to all visual tokens
+                # from one image/video
+                if mm_embed_idx < num_mm_tokens:
+                    # Get all visual tokens for this placeholder
+                    # For now, assume all visual tokens belong to first
+                    # placeholder. This matches OpenCUA's behavior:
+                    # 1 placeholder -> all visual tokens
+                    if mm_embed_idx == 0:
+                        result_parts.append(mm_embeds_flat)
+                        mm_embed_idx = num_mm_tokens
+                    else:
+                        # Subsequent placeholders (shouldn't happen in prefill)
+                        # Use a dummy embedding
+                        result_parts.append(
+                            mm_embeds_flat[0:1].expand(1, -1)
+                        )
+            else:
+                # Text token: use text embedding
+                result_parts.append(text_embeds[text_idx:text_idx + 1])
+                text_idx += 1
+        
+        # Concatenate all parts
+        if result_parts:
+            result = torch.cat(result_parts, dim=0)
+        else:
+            # Fallback: use parent's implementation
+            result = super().get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+                handle_oov_mm_token=handle_oov_mm_token,
+            )
+        
         # Store the actual length for use in forward()
-        # This is needed because _preprocess truncates to num_scheduled_tokens
-        self._last_embeddings_length = result.shape[0]
+        result_len = result.shape[0]
+        if (
+            self._last_embeddings_length is None
+            or result_len > self._last_embeddings_length
+        ):
+            self._last_embeddings_length = result_len
+        
+        logger.info(
+            "OpenCUA get_input_embeddings - expanded: "
+            "input_ids=%d -> result=%d (text=%d, placeholders=%d, "
+            "visual_tokens=%d)",
+            input_ids.shape[0],
+            result_len,
+            num_text_tokens,
+            num_placeholders,
+            num_mm_tokens,
+        )
         
         return result
 
