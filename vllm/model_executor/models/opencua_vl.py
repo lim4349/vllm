@@ -822,7 +822,7 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     info=OpenCUAVLProcessingInfo,
     dummy_inputs=OpenCUAVLDummyInputsBuilder,
 )
-class OpenCUAForConditionalGeneration(
+class OpenCUA_VLForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsLoRA,
