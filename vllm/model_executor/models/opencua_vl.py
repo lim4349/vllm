@@ -1846,31 +1846,48 @@ class OpenCUA_VLForConditionalGeneration(
         # Flatten multimodal embeddings
         from vllm.model_executor.models.utils import _flatten_embeddings
         
-        # Debug: log multimodal_embeddings structure
+        # Debug: log inputs
         logger.info(
-            "OpenCUA get_input_embeddings - multimodal_embeddings: "
-            "type=%s, len=%d",
-            type(multimodal_embeddings),
+            "OpenCUA get_input_embeddings - input_ids.shape=%s, "
+            "is_multimodal.shape=%s, is_multimodal.sum()=%d, "
+            "multimodal_embeddings len=%d",
+            input_ids.shape,
+            is_multimodal.shape if is_multimodal is not None else None,
+            is_multimodal.sum().item() if is_multimodal is not None else 0,
             len(multimodal_embeddings) if multimodal_embeddings else 0,
         )
+        
         if multimodal_embeddings:
             for i, emb in enumerate(multimodal_embeddings):
                 logger.info(
                     "OpenCUA get_input_embeddings - multimodal_embeddings[%d]: "
-                    "type=%s, shape=%s",
+                    "shape=%s",
                     i,
-                    type(emb),
                     emb.shape if hasattr(emb, "shape") else "N/A",
                 )
         
+        # CRITICAL: OpenCUA expands 1 placeholder to multiple visual tokens.
+        # _gather_mm_embeddings may filter multimodal_embeddings to match
+        # is_multimodal.sum(), but we need the full visual tokens.
+        # 
+        # multimodal_embeddings is a tuple of tensors, where each tensor
+        # corresponds to one image/video and contains all visual tokens.
+        # _flatten_embeddings concatenates them, but if _gather_mm_embeddings
+        # filtered them, we may only get 1 token per placeholder.
+        #
+        # Solution: Use multimodal_embeddings directly without filtering.
+        # Each element in multimodal_embeddings is the full visual tokens
+        # for one image/video.
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
         num_mm_tokens = mm_embeds_flat.shape[0]
         
         logger.info(
             "OpenCUA get_input_embeddings - after flatten: "
-            "mm_embeds_flat.shape=%s, num_mm_tokens=%d",
+            "mm_embeds_flat.shape=%s, num_mm_tokens=%d, "
+            "multimodal_embeddings len=%d",
             mm_embeds_flat.shape,
             num_mm_tokens,
+            len(multimodal_embeddings) if multimodal_embeddings else 0,
         )
         
         # Get text embeddings (excluding placeholder tokens)
@@ -1888,31 +1905,34 @@ class OpenCUA_VLForConditionalGeneration(
         num_placeholders = is_mm_mask.sum().item()
         
         # Build expanded embeddings: text tokens + visual tokens
-        # For each placeholder, replace with visual tokens
+        # For each placeholder, replace with visual tokens from corresponding
+        # multimodal_embeddings element
         result_parts = []
         text_idx = 0
-        mm_embed_idx = 0
+        mm_item_idx = 0  # Index into multimodal_embeddings tuple
         
         for i in range(input_ids.shape[0]):
             if is_mm_mask[i]:
-                # Placeholder: insert visual tokens
-                # Count how many visual tokens belong to this placeholder
-                # In OpenCUA, each placeholder expands to all visual tokens
-                # from one image/video
-                if mm_embed_idx < num_mm_tokens:
-                    # Get all visual tokens for this placeholder
-                    # For now, assume all visual tokens belong to first
-                    # placeholder. This matches OpenCUA's behavior:
-                    # 1 placeholder -> all visual tokens
-                    if mm_embed_idx == 0:
-                        result_parts.append(mm_embeds_flat)
-                        mm_embed_idx = num_mm_tokens
+                # Placeholder: insert visual tokens from corresponding mm item
+                # Each placeholder corresponds to one element in
+                # multimodal_embeddings (one image/video)
+                if mm_item_idx < len(multimodal_embeddings):
+                    # Get visual tokens for this placeholder
+                    # multimodal_embeddings[mm_item_idx] is a tensor of shape
+                    # (num_visual_tokens, embed_dim)
+                    mm_item = multimodal_embeddings[mm_item_idx]
+                    if isinstance(mm_item, torch.Tensor):
+                        # Flatten if needed (should already be 2D)
+                        if mm_item.dim() > 2:
+                            mm_item = mm_item.flatten(0, -2)
+                        result_parts.append(mm_item)
                     else:
-                        # Subsequent placeholders (shouldn't happen in prefill)
-                        # Use a dummy embedding
-                        result_parts.append(
-                            mm_embeds_flat[0:1].expand(1, -1)
-                        )
+                        # Fallback: use flattened embeddings
+                        result_parts.append(mm_embeds_flat)
+                    mm_item_idx += 1
+                else:
+                    # Fallback: use flattened embeddings
+                    result_parts.append(mm_embeds_flat)
             else:
                 # Text token: use text embedding
                 result_parts.append(text_embeds[text_idx:text_idx + 1])
