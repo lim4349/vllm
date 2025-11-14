@@ -2250,9 +2250,12 @@ class OpenCUA_VLForConditionalGeneration(
         attention_mask = attention_mask.to(target_device)
 
         # 4. Fill the embeddings based on the mask.
-        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
-            batch_indices, non_image_indices
-        ]
+        # inputs_embeds is (batch_size, sequence_length, embed_dim)
+        # batch_indices and non_image_indices are 1D tensors from torch.where
+        # We need to index correctly: inputs_embeds[batch_indices, non_image_indices]
+        # This should give us (num_text_tokens, embed_dim)
+        text_embeds = inputs_embeds[batch_indices, non_image_indices]
+        final_embedding[batch_indices, text_to_overwrite] = text_embeds
         final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[
             batch_indices, non_image_indices
         ]
@@ -2368,11 +2371,13 @@ class OpenCUA_VLForConditionalGeneration(
             logger.info("OpenCUA get_input_embeddings: no is_multimodal mask")
 
         # Get text embeddings first
+        # For HF-style merge, we need full embeddings (not masked)
+        # So we use handle_oov_mm_token=False to get complete embeddings
         inputs_embeds = self._get_text_embeddings(
             input_ids,
             self.get_language_model().get_input_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
+            handle_oov_mm_token=False,  # Need full embeddings for HF merge
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
