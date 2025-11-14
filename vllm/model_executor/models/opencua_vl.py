@@ -14,7 +14,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoImageProcessor, BatchFeature
-from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
+from transformers.models.qwen2_5_vl import (
+    Qwen2_5_VLImageProcessor,
+    Qwen2_5_VLProcessor,
+    Qwen2_5_VLVideoProcessor,
+)
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -765,13 +769,37 @@ class OpenCUAVisionTransformer(nn.Module):
         return loaded_params
 
 
+class OpenCUAProcessor(Qwen2_5_VLProcessor):
+    """
+    Custom processor for OpenCUA that accepts TikTokenV3 tokenizer.
+    """
+
+    def __init__(
+        self,
+        image_processor: Qwen2_5_VLImageProcessor | None = None,
+        tokenizer: Any = None,
+        video_processor: Qwen2_5_VLVideoProcessor | None = None,
+        chat_template: str | None = None,
+        **kwargs,
+    ):
+        # Bypass type checking by calling parent's __init__ directly
+        # Qwen2_5_VLProcessor expects Qwen2Tokenizer but we use TikTokenV3
+        super(Qwen2_5_VLProcessor, self).__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            video_processor=video_processor,
+            chat_template=chat_template,
+            **kwargs,
+        )
+
+
 class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(OpenCUA_VLConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> OpenCUAProcessor:
         """
-        Load Qwen2_5_VLProcessor for OpenCUA model.
+        Load OpenCUAProcessor for OpenCUA model.
         OpenCUA uses Qwen2.5-VL processor structure but with TikTokenV3 tokenizer.
         """
         # Get already initialized tokenizer (TikTokenV3)
@@ -780,12 +808,17 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
         # Get image processor
         image_processor = self.get_image_processor(**kwargs)
 
+        # Get video processor config
+        video_processor_config = self.ctx.get_hf_image_processor_config()
+        video_processor = Qwen2_5_VLVideoProcessor(**video_processor_config)
+
         # Initialize processor with tokenizer and image_processor
-        # This avoids Qwen2Tokenizer loading issues
+        # This avoids Qwen2Tokenizer type checking issues
         return self.ctx.init_processor(
-            Qwen2_5_VLProcessor,
+            OpenCUAProcessor,
             tokenizer=tokenizer,
             image_processor=image_processor,
+            video_processor=video_processor,
             **kwargs,
         )
 
