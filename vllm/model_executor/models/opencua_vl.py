@@ -766,6 +766,9 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
         return self.ctx.get_hf_config(OpenCUA_VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+        # Ensure tokenizer is initialized before creating processor
+        # This prevents vocab_file being None when processor loads tokenizer
+        self.get_tokenizer()
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
