@@ -1824,39 +1824,55 @@ class OpenCUA_VLForConditionalGeneration(
         # For multimodal models, positions may be shorter than inputs_embeds
         # because scheduler only counts text tokens. Expand positions to match
         # inputs_embeds length (which includes visual tokens).
-        if inputs_embeds is not None and positions.shape[-1] < inputs_embeds.shape[0]:
-            # positions is (3, L) where L < inputs_embeds.shape[0]
-            # Expand to match inputs_embeds length using 1D sequential positions
+        if inputs_embeds is not None:
             current_len = positions.shape[-1]
             target_len = inputs_embeds.shape[0]
             
-            # Get the last position value from each dimension
-            last_positions = positions[:, -1:]  # (3, 1)
+            logger.info(
+                "OpenCUA forward - checking positions expansion: "
+                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d",
+                current_len,
+                target_len,
+            )
             
-            # Generate sequential positions for the remaining tokens
-            # For 1D RoPE, all 3 dimensions should have the same values
-            remaining_len = target_len - current_len
-            if remaining_len > 0:
-                # Create sequential positions starting from last position + 1
-                start_pos = last_positions[0, 0].item() + 1
-                new_positions_1d = torch.arange(
-                    start_pos,
-                    start_pos + remaining_len,
-                    dtype=positions.dtype,
-                    device=positions.device,
-                )
-                # Expand to (3, remaining_len) for MRoPE interface
-                new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
+            if current_len < target_len:
+                # positions is (3, L) where L < inputs_embeds.shape[0]
+                # Expand to match inputs_embeds length using 1D sequential positions
+                # Get the last position value from each dimension
+                last_positions = positions[:, -1:]  # (3, 1)
                 
-                # Concatenate with existing positions
-                positions = torch.cat([positions, new_positions], dim=-1)
-                
+                # Generate sequential positions for the remaining tokens
+                # For 1D RoPE, all 3 dimensions should have the same values
+                remaining_len = target_len - current_len
+                if remaining_len > 0:
+                    # Create sequential positions starting from last position + 1
+                    start_pos = last_positions[0, 0].item() + 1
+                    new_positions_1d = torch.arange(
+                        start_pos,
+                        start_pos + remaining_len,
+                        dtype=positions.dtype,
+                        device=positions.device,
+                    )
+                    # Expand to (3, remaining_len) for MRoPE interface
+                    new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
+                    
+                    # Concatenate with existing positions
+                    positions = torch.cat([positions, new_positions], dim=-1)
+                    
+                    logger.info(
+                        "OpenCUA forward - expanded positions from %d to %d "
+                        "(added %d visual token positions)",
+                        current_len,
+                        target_len,
+                        remaining_len,
+                    )
+            elif current_len > target_len:
+                # Trim positions if it's longer than inputs_embeds
+                positions = positions[:, :target_len]
                 logger.info(
-                    "OpenCUA forward - expanded positions from %d to %d "
-                    "(added %d visual token positions)",
+                    "OpenCUA forward - trimmed positions from %d to %d",
                     current_len,
                     target_len,
-                    remaining_len,
                 )
         
         logger.info(
