@@ -1850,7 +1850,13 @@ class OpenCUA_VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         """
         Called by vLLM V1 engine: GPUModelRunner._init_mrope_positions()
-        Returns 1D position IDs for OpenCUA (not 3D MRoPE).
+        
+        OpenCUA uses 1D sequential position_ids (HuggingFace implementation).
+        This matches the HuggingFace implementation where:
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        
+        Returns (3, L) shape tensor for vLLM MRoPE interface compatibility,
+        but all 3 rows contain the same 1D sequential positions.
         """
         logger = init_logger(__name__)
         logger.info(
@@ -1873,7 +1879,7 @@ class OpenCUA_VLForConditionalGeneration(
 
         # Logging
         logger.info(
-            "OpenCUA MRoPE positions - input_tokens len: %d, "
+            "OpenCUA 1D RoPE positions - input_tokens len: %d, "
             "image_nums: %d, video_nums: %d, "
             "image_token_id: %d, video_token_id: %d, "
             "spatial_merge_size: %d",
@@ -2001,7 +2007,7 @@ class OpenCUA_VLForConditionalGeneration(
 
             # Logging
             logger.info(
-                "OpenCUA MRoPE segment - st: %d, ed: %d, text_len: %d, "
+                "OpenCUA 1D RoPE segment - st: %d, ed: %d, text_len: %d, "
                 "grid_thw: [%d, %d, %d] (patch units), "
                 "llm_grid: [%d, %d, %d], num_visual_tokens: %d, st_idx: %d",
                 st,
@@ -2017,65 +2023,33 @@ class OpenCUA_VLForConditionalGeneration(
                 st_idx,
             )
             if text_len > 0:
-                text_positions = (
-                    torch.arange(text_len)
-                    .view(1, -1)
-                    .expand(3, -1)
-                    + st_idx
-                )
+                # OpenCUA uses 1D sequential position_ids (not 3D MRoPE)
+                # HuggingFace: position_ids = attention_mask.long().cumsum(-1) - 1
+                text_positions = torch.arange(text_len, dtype=torch.long) + st_idx
                 llm_pos_ids_list.append(text_positions)
 
-            # OpenCUA uses 1D RoPE for vision transformer, but language model
-            # MRoPE still expects 3D positions. Generate proper 3D positions
-            # for visual tokens (t, h, w dimensions)
-            t_index = (
-                torch.arange(llm_grid_t)
-                .view(-1, 1)
-                .expand(-1, llm_grid_h * llm_grid_w)
-                .flatten()
-            )
-            h_index = (
-                torch.arange(llm_grid_h)
-                .view(1, -1, 1)
-                .expand(llm_grid_t, -1, llm_grid_w)
-                .flatten()
-            )
-            w_index = (
-                torch.arange(llm_grid_w)
-                .view(1, 1, -1)
-                .expand(llm_grid_t, llm_grid_h, -1)
-                .flatten()
-            )
-            # visual_positions start after text_len tokens
-            # This matches Qwen2.5-VL logic: visual_positions = positions + text_len + st_idx
+            # OpenCUA uses 1D RoPE for both vision transformer and language model
+            # Generate 1D sequential positions for visual tokens
+            # HuggingFace implementation uses sequential position_ids, not 3D MRoPE
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
             
-            # Calculate the starting position for visual tokens
-            # After text positions, visual tokens start at text_len + st_idx
+            # Visual tokens start after text_len tokens
+            # Sequential positions: [start, start+1, ..., start+num_visual_tokens-1]
             visual_start_pos = text_len + st_idx
             visual_positions = (
-                torch.stack([t_index, h_index, w_index]) + visual_start_pos
+                torch.arange(num_visual_tokens, dtype=torch.long) + visual_start_pos
             )
 
             # Logging
             logger.info(
-                "OpenCUA MRoPE visual - visual_positions shape: %s, "
+                "OpenCUA 1D RoPE visual - visual_positions shape: %s, "
                 "visual_positions min: %d, max: %d, num_visual_tokens: %d, "
-                "visual_start_pos: %d, t_index max: %d, "
-                "h_index max: %d, w_index max: %d, "
-                "visual_positions[0] max: %d, "
-                "visual_positions[1] max: %d, visual_positions[2] max: %d",
+                "visual_start_pos: %d",
                 str(visual_positions.shape),
                 visual_positions.min().item(),
                 visual_positions.max().item(),
                 num_visual_tokens,
                 visual_start_pos,
-                t_index.max().item(),
-                h_index.max().item(),
-                w_index.max().item(),
-                visual_positions[0].max().item(),
-                visual_positions[1].max().item(),
-                visual_positions[2].max().item(),
             )
 
             llm_pos_ids_list.append(visual_positions)
@@ -2085,9 +2059,12 @@ class OpenCUA_VLForConditionalGeneration(
             
             # Logging
             logger.info(
-                "OpenCUA MRoPE update st - ed: %d, num_visual_tokens: %d, "
+                "OpenCUA 1D RoPE update st - ed: %d, num_visual_tokens: %d, "
                 "st before: %d, st after: %d",
-                ed, num_visual_tokens, st, ed + num_visual_tokens,
+                ed,
+                num_visual_tokens,
+                st,
+                ed + num_visual_tokens,
             )
             
             st = ed + num_visual_tokens
@@ -2099,7 +2076,7 @@ class OpenCUA_VLForConditionalGeneration(
             
             # Logging
             logger.info(
-                "OpenCUA MRoPE remaining text - st: %d, len(input_tokens): %d, "
+                "OpenCUA 1D RoPE remaining text - st: %d, len(input_tokens): %d, "
                 "text_len: %d, st_idx: %d, text_positions min: %d, max: %d",
                 st,
                 len(input_tokens),
@@ -2109,31 +2086,46 @@ class OpenCUA_VLForConditionalGeneration(
                 text_positions.max().item(),
             )
             
-            llm_pos_ids_list.append(
-                text_positions.view(1, -1).expand(3, -1)
-            )
+            llm_pos_ids_list.append(text_positions)
 
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        
-        # Logging before calculating delta
+        # Concatenate all 1D position_ids
+        # OpenCUA uses 1D sequential positions (HuggingFace implementation)
+        llm_positions_1d = torch.cat(llm_pos_ids_list, dim=0)
+
+        # Logging before slicing
         logger.info(
-            "OpenCUA MRoPE before delta - llm_positions shape: %s, "
-            "llm_positions.max(): %d, input_tokens len: %d",
-            str(llm_positions.shape),
-            llm_positions.max().item(),
+            "OpenCUA 1D RoPE before slice - llm_positions_1d shape: %s, "
+            "llm_positions_1d.max(): %d, input_tokens len: %d",
+            str(llm_positions_1d.shape),
+            llm_positions_1d.max().item(),
             len(input_tokens),
         )
-        
-        # mrope_position_delta calculation matches Qwen2.5-VL
-        # This represents the difference between the maximum position and the input length
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
-        
+
+        # OpenCUA uses 1D sequential position_ids
+        # Slice according to context_len and seq_len if provided
+        if seq_len is not None:
+            llm_positions_1d = llm_positions_1d[context_len:seq_len]
+        elif context_len > 0:
+            llm_positions_1d = llm_positions_1d[context_len:]
+
+        # vLLM expects mrope_positions to be (3, L) shape for MRoPE interface
+        # For OpenCUA, we use 1D sequential positions, so we repeat the same
+        # 1D positions 3 times to match the expected shape
+        # This allows vLLM to use positions[0] (or any row) as the actual position_ids
+        llm_positions = llm_positions_1d.unsqueeze(0).expand(3, -1)
+
+        # For compatibility with vLLM interface, return delta = 0
+        # (positions are already correct, no adjustment needed)
+        mrope_position_delta = 0
+
         # Logging
         logger.info(
-            "OpenCUA MRoPE final - llm_positions shape: %s, "
+            "OpenCUA 1D RoPE final - llm_positions_1d shape: %s, "
+            "llm_positions shape: %s, llm_positions.max(): %d, "
             "mrope_position_delta: %d, context_len: %d, seq_len: %s",
+            str(llm_positions_1d.shape),
             str(llm_positions.shape),
+            llm_positions.max().item(),
             mrope_position_delta,
             context_len,
             seq_len,
