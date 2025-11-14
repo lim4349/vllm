@@ -1410,6 +1410,9 @@ class OpenCUA_VLForConditionalGeneration(
         self.config = config
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
+        # Store the actual length of embeddings returned by get_input_embeddings
+        # This is needed because _preprocess truncates to num_scheduled_tokens
+        self._last_embeddings_length: int | None = None
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -1807,6 +1810,29 @@ class OpenCUA_VLForConditionalGeneration(
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        """Override to track the actual length of embeddings including visual tokens."""
+        # Call parent's get_input_embeddings
+        result = super().get_input_embeddings(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+        
+        # Store the actual length for use in forward()
+        # This is needed because _preprocess truncates to num_scheduled_tokens
+        self._last_embeddings_length = result.shape[0]
+        
+        return result
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1831,47 +1857,33 @@ class OpenCUA_VLForConditionalGeneration(
         # self.inputs_embeds.gpu[:num_scheduled_tokens], which truncates
         # visual tokens. So inputs_embeds here is 28, not 1371.
         # 
-        # Solution: Check if we're in prefill phase (positions end at low value
-        # like 27) and if inputs_embeds length suggests visual tokens should be
-        # present. We can't access req.mrope_positions here, so we use a heuristic:
-        # if positions end at a low value (< 100) and we have inputs_embeds,
-        # we're likely in prefill and should expand positions.
+        # Solution: Use self._last_embeddings_length which stores the actual
+        # length returned by get_input_embeddings (including visual tokens).
+        # This allows us to expand positions to the correct length even though
+        # inputs_embeds is truncated.
         if inputs_embeds is not None and positions.shape[-1] > 0:
             current_len = positions.shape[-1]
-            target_len = inputs_embeds.shape[0]
+            inputs_embeds_len = inputs_embeds.shape[0]
+            # Use the actual length from get_input_embeddings if available
+            target_len = (
+                self._last_embeddings_length
+                if self._last_embeddings_length is not None
+                else inputs_embeds_len
+            )
             max_pos = positions[0, -1].item()
-            
-            # Heuristic: If positions end at a low value (< 100) and we're in
-            # what looks like prefill (current_len == target_len and both are small),
-            # we might be missing visual tokens. But we can't know the true length
-            # without accessing req.mrope_positions.
-            #
-            # Actually, the real issue is that inputs_embeds is truncated to 28
-            # in _preprocess. So we can't rely on inputs_embeds.length here.
-            #
-            # Instead, we check if positions look incomplete: if max_pos is small
-            # (e.g., 27) and we know from get_mrope_input_positions that visual
-            # tokens should start right after, we need to expand.
-            #
-            # But we can't access req.mrope_positions here. So we need a different
-            # approach: check if this looks like prefill with visual tokens.
-            # If positions end at 27 and we have inputs_embeds, visual tokens
-            # should start at position 28. But we don't know how many.
-            #
-            # For now, we only expand if inputs_embeds is longer than positions.
-            # This won't help if inputs_embeds is also truncated, but it's the
-            # best we can do without modifying gpu_model_runner.py.
             
             logger.info(
                 "OpenCUA forward - positions check: "
-                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d, max_pos=%d",
+                "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d, "
+                "_last_embeddings_length=%s, max_pos=%d",
                 current_len,
-                target_len,
+                inputs_embeds_len,
+                self._last_embeddings_length,
                 max_pos,
             )
             
             if current_len < target_len:
-                # Expand positions to match inputs_embeds length
+                # Expand positions to match the actual embeddings length
                 last_positions = positions[:, -1:]  # (3, 1)
                 remaining_len = target_len - current_len
                 if remaining_len > 0:
@@ -1887,13 +1899,15 @@ class OpenCUA_VLForConditionalGeneration(
                     
                     logger.info(
                         "OpenCUA forward - expanded positions from %d to %d "
-                        "(added %d positions based on inputs_embeds length)",
+                        "(added %d visual token positions, "
+                        "using _last_embeddings_length=%d)",
                         current_len,
                         target_len,
                         remaining_len,
+                        self._last_embeddings_length or inputs_embeds_len,
                     )
             elif current_len > target_len:
-                # Trim positions if longer than inputs_embeds
+                # Trim positions if longer than target
                 positions = positions[:, :target_len]
                 logger.info(
                     "OpenCUA forward - trimmed positions from %d to %d",
