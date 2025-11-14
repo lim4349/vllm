@@ -881,9 +881,49 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
+        config = self.info.get_hf_config()
+
+        # Get image token - try processor first, then config, then tokenizer vocab
+        if hasattr(hf_processor, "image_token"):
+            image_token_str = hf_processor.image_token
+        elif hasattr(config, "image_token_id"):
+            # Use image_token_id from config to find token string
+            image_token_id = config.image_token_id
+            # Reverse lookup in vocab
+            image_token_str = None
+            for token, token_id in vocab.items():
+                if token_id == image_token_id:
+                    image_token_str = token
+                    break
+            if image_token_str is None:
+                # Fallback: try common token names
+                for token_name in [
+                    "<|media_placeholder|>",
+                    "<|image_pad|>",
+                    "<|image|>",
+                ]:
+                    if token_name in vocab:
+                        image_token_str = token_name
+                        break
+        else:
+            # Final fallback: try common token names
+            image_token_str = None
+            for token_name in [
+                "<|media_placeholder|>",
+                "<|image_pad|>",
+                "<|image|>",
+            ]:
+                if token_name in vocab:
+                    image_token_str = token_name
+                    break
+
+        if image_token_str is None or image_token_str not in vocab:
+            raise ValueError(
+                "Could not find image token in processor, config, or tokenizer vocab"
+            )
 
         placeholder = {
-            "image": vocab[hf_processor.image_token],
+            "image": vocab[image_token_str],
         }
 
         merge_length = image_processor.merge_size**2
