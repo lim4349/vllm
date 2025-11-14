@@ -772,12 +772,20 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         """
         Load Qwen2_5_VLProcessor for OpenCUA model.
-        OpenCUA uses Qwen2.5-VL processor structure.
+        OpenCUA uses Qwen2.5-VL processor structure but with TikTokenV3 tokenizer.
         """
-        # OpenCUA uses Qwen2.5-VL processor, so load it explicitly
-        return self.ctx.get_hf_processor(
+        # Get already initialized tokenizer (TikTokenV3)
+        tokenizer = self.get_tokenizer()
+
+        # Get image processor
+        image_processor = self.get_image_processor(**kwargs)
+
+        # Initialize processor with tokenizer and image_processor
+        # This avoids Qwen2Tokenizer loading issues
+        return self.ctx.init_processor(
             Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
+            tokenizer=tokenizer,
+            image_processor=image_processor,
             **kwargs,
         )
 
