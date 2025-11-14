@@ -13,8 +13,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
-from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
+from transformers import AutoProcessor, BatchFeature
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -765,15 +764,24 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(OpenCUA_VLConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        # Ensure tokenizer is initialized before creating processor
-        # This prevents vocab_file being None when processor loads tokenizer
-        self.get_tokenizer()
-        return self.ctx.get_hf_processor(
-            Qwen2_5_VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
+    def get_hf_processor(self, **kwargs: object):
+        """
+        Load processor directly from OpenCUA model using AutoProcessor.
+        This matches how HuggingFace loads the processor.
+        """
+        # Use AutoProcessor to load processor from OpenCUA model
+        # This will automatically detect and load the correct processor
+        model_path = self.ctx.model_config.model
+        use_fast = kwargs.pop("use_fast", True)
+
+        # Load processor directly from model path, same as HF
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            use_fast=use_fast,
+            trust_remote_code=True,
             **kwargs,
         )
+        return processor
 
 
 class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
