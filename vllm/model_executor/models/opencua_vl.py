@@ -2406,8 +2406,41 @@ class OpenCUA_VLForConditionalGeneration(
         # Ensure input_ids is 2D
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
+            if is_multimodal is not None and is_multimodal.dim() == 1:
+                is_multimodal = is_multimodal.unsqueeze(0)
 
         batch_size, sequence_length = inputs_embeds.shape[:2]
+        image_token_id = self.config.media_placeholder_token_id
+        num_expected_placeholders = len(feature_lengths)
+
+        # Check if input_ids already has expanded placeholders
+        image_token_mask = input_ids == image_token_id
+        num_placeholders_in_input = image_token_mask.sum().item()
+
+        # If placeholders are already expanded, compress to original (1 per image)
+        if num_placeholders_in_input > num_expected_placeholders:
+            # Use is_multimodal to find original placeholder positions
+            compressed_input_ids = torch.zeros_like(input_ids)
+            for batch_idx in range(batch_size):
+                if batch_idx >= is_multimodal.shape[0]:
+                    continue
+                batch_is_multimodal = is_multimodal[batch_idx]
+                multimodal_indices = torch.where(batch_is_multimodal)[0]
+                if len(multimodal_indices) > 0:
+                    # Find group boundaries: where consecutive multimodal tokens start
+                    group_starts = [multimodal_indices[0].item()]
+                    for i in range(1, len(multimodal_indices)):
+                        if multimodal_indices[i] - multimodal_indices[i - 1] > 1:
+                            group_starts.append(multimodal_indices[i].item())
+                    # Take first num_expected_placeholders group starts
+                    keep_positions = group_starts[:num_expected_placeholders]
+                    for pos in keep_positions:
+                        if pos < input_ids.shape[1]:
+                            compressed_input_ids[batch_idx, pos] = image_token_id
+            input_ids_for_merge = compressed_input_ids
+        else:
+            input_ids_for_merge = input_ids
+
         attention_mask = torch.ones(
             batch_size, sequence_length, dtype=torch.bool, device=inputs_embeds.device
         )
@@ -2421,7 +2454,7 @@ class OpenCUA_VLForConditionalGeneration(
             image_features=image_features_flat,
             feature_lengths=feature_lengths,
             inputs_embeds=inputs_embeds,
-            input_ids=input_ids,
+            input_ids=input_ids_for_merge,
             attention_mask=attention_mask,
             labels=None,
         )
