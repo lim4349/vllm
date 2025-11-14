@@ -13,7 +13,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoImageProcessor, AutoProcessor, BatchFeature
+from transformers import AutoImageProcessor, BatchFeature
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
@@ -773,20 +773,10 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
         Load processor directly from OpenCUA model using AutoProcessor.
         AutoProcessor will automatically detect and load the correct processor
         based on the model's config, handling TikTokenV3 tokenizer correctly.
+        Uses cached processor to avoid multiple reloads.
         """
-        model_path = self.ctx.model_config.model
-        use_fast = kwargs.pop("use_fast", True)
-
-        # Use AutoProcessor to load processor from OpenCUA model
-        # This will automatically detect and load the correct processor
-        # based on the model's config, including TikTokenV3 tokenizer
-        processor = AutoProcessor.from_pretrained(
-            model_path,
-            use_fast=use_fast,
-            trust_remote_code=True,
-            **kwargs,
-        )
-        return processor
+        # Use cached processor to avoid multiple reloads
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_image_processor(self, **kwargs: object):
         """
@@ -871,6 +861,47 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """
+        Call HF processor with proper keyword handling.
+        OpenCUA processor may not recognize 'images' keyword if it's filtered out.
+        We need to ensure the processor receives the data correctly.
+        """
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+
+        # Prepare data dict - ensure images are included
+        data_dict = dict(text=prompt)
+        data_dict.update(mm_data)
+
+        # Call processor directly, bypassing keyword filtering
+        # This ensures 'images' keyword is passed through
+        try:
+            output = hf_processor(**data_dict, **tok_kwargs)
+        except Exception as exc:
+            # If images keyword is not recognized, try with vision_infos
+            if "not recognized" in str(exc) and "images" in mm_data:
+                # OpenCUA might use vision_infos instead of images
+                data_dict_alt = dict(text=prompt)
+                if "images" in data_dict:
+                    data_dict_alt["vision_infos"] = data_dict.pop("images")
+                output = hf_processor(**data_dict_alt, **tok_kwargs)
+            else:
+                raise
+
+        # Ensure BatchFeature is returned
+        from transformers.feature_extraction_utils import BatchFeature
+
+        if not isinstance(output, BatchFeature):
+            output = BatchFeature(output, tensor_type="pt")
+
+        return output
 
     def _get_prompt_updates(
         self,
