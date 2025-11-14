@@ -740,18 +740,33 @@ class OpenCUA_VisionTransformer(nn.Module):
         """
         Get 1D RoPE embeddings for OpenCUA.
         Uses simple sequential positions (0, 1, 2, ...) without window attention.
+
+        Key difference from Qwen2.5-VL:
+        - Qwen2.5-VL: RoPE is applied after spatial merge (at token level)
+        - OpenCUA: RoPE is applied before spatial merge (at patch level)
         """
         # Total patches after patch_embed: t * h * w
         total_patches = t * h * w
 
-        # Generate 1D RoPE for all patches in sequential order
-        # RoPE is applied before spatial merge, so we need RoPE for all patches
+        # Calculate tokens after spatial merge
+        llm_grid_h = h // self.spatial_merge_size
+        llm_grid_w = w // self.spatial_merge_size
+        total_tokens = t * llm_grid_h * llm_grid_w
+
+        # Generate 1D RoPE for patches in sequential order
+        # Shape: [total_patches, rotary_dim // 2]
         rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_patches)
 
+        # Reshape for spatial merge: group spatial_merge_unit patches together
+        # Shape: [total_tokens, spatial_merge_unit, rotary_dim // 2]
+        rotary_pos_emb_1d = rotary_pos_emb_1d.view(
+            total_tokens, self.spatial_merge_unit, -1
+        )
+        # Flatten: [total_patches, rotary_dim // 2]
+        rotary_pos_emb_1d = rotary_pos_emb_1d.flatten(start_dim=0, end_dim=1)
+
         # cu_seqlens: cumulative sequence lengths for each image/frame
-        # After spatial merge, each frame has (h * w) // spatial_merge_unit tokens
-        # But for attention, we use the patch count before merge
-        # because RoPE is applied at patch level
+        # Use patch count (before merge) for attention
         cu_seqlens_1d = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
@@ -816,11 +831,15 @@ class OpenCUA_VisionTransformer(nn.Module):
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
 
-        # For 1D RoPE with full attention:
-        # - RoPE is applied at patch level (before spatial merge)
-        # - Attention operates on patches in sequential order
-        # - No window reordering needed
-        # Shape: [total_patches, hidden_size] -> [total_patches, 1, hidden_size]
+        # Reshape for spatial merge (like Qwen2.5-VL, but no window reordering)
+        # Shape: [total_patches, hidden_size] ->
+        # [total_patches // spatial_merge_unit, spatial_merge_unit, hidden_size]
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        # Reshape back to [total_patches, hidden_size] for attention
+        # (no window reordering, so just flatten)
+        hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(1)
 
         # All layers use full attention (no window attention)
@@ -834,7 +853,7 @@ class OpenCUA_VisionTransformer(nn.Module):
                 seqlens=seqlens,
             )
 
-        # After blocks, reshape for spatial merge
+        # After blocks, reshape for spatial merge (merger expects grouped patches)
         # Shape: [total_patches, 1, hidden_size] ->
         # [total_patches // spatial_merge_unit, 1, spatial_merge_unit, hidden_size]
         seq_len_after_blocks = hidden_states.shape[0]
@@ -1816,6 +1835,19 @@ class OpenCUA_VLForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        """
+        Called by vLLM V1 engine: GPUModelRunner.execute_model()
+        Forward pass through language model.
+        """
+        logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
+            "inputs_embeds shape: %s",
+            input_ids.shape if input_ids is not None else None,
+            positions.shape,
+            inputs_embeds.shape if inputs_embeds is not None else None,
+        )
+
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1845,7 +1877,18 @@ class OpenCUA_VLForConditionalGeneration(
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
+        """
+        Called by vLLM V1 engine: GPUModelRunner._init_mrope_positions()
+        Returns 1D position IDs for OpenCUA (not 3D MRoPE).
+        """
         logger = init_logger(__name__)
+        logger.info(
+            "OpenCUA get_mrope_input_positions called - input_tokens len: %d, "
+            "image_grid_thw: %s, video_grid_thw: %s",
+            len(input_tokens),
+            image_grid_thw,
+            video_grid_thw,
+        )
         if image_grid_thw is None:
             image_grid_thw = []
         if video_grid_thw is None:
