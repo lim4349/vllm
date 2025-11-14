@@ -14,14 +14,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoImageProcessor, BatchFeature
-from transformers.models.qwen2_5_vl import (
-    Qwen2_5_VLImageProcessor,
-    Qwen2_5_VLProcessor,
-    Qwen2_5_VLVideoProcessor,
-)
+from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
+from transformers.models.qwen2_vl import Qwen2VLVideoProcessor
 
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
@@ -776,9 +773,9 @@ class OpenCUAProcessor(Qwen2_5_VLProcessor):
 
     def __init__(
         self,
-        image_processor: Qwen2_5_VLImageProcessor | None = None,
+        image_processor: Any = None,
         tokenizer: Any = None,
-        video_processor: Qwen2_5_VLVideoProcessor | None = None,
+        video_processor: Any = None,
         chat_template: str | None = None,
         **kwargs,
     ):
@@ -810,7 +807,7 @@ class OpenCUAVLProcessingInfo(Qwen2VLProcessingInfo):
 
         # Get video processor config
         video_processor_config = self.ctx.get_hf_image_processor_config()
-        video_processor = Qwen2_5_VLVideoProcessor(**video_processor_config)
+        video_processor = Qwen2VLVideoProcessor(**video_processor_config)
 
         # Initialize processor with tokenizer and image_processor
         # This avoids Qwen2Tokenizer type checking issues
