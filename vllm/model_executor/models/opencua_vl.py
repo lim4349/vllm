@@ -937,14 +937,18 @@ class OpenCUAVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
             return [placeholder[modality]] * num_tokens
 
-        return [
-            PromptReplacement(
-                modality=modality,
-                target=[placeholder[modality]],
-                replacement=partial(get_replacement_opencua, modality=modality),
+        # Only process modalities that exist in mm_items
+        prompt_updates = []
+        if "image" in mm_items:
+            prompt_updates.append(
+                PromptReplacement(
+                    modality="image",
+                    target=[placeholder["image"]],
+                    replacement=partial(get_replacement_opencua, modality="image"),
+                )
             )
-            for modality in ("image",)
-        ]
+
+        return prompt_updates
 
 
 @MULTIMODAL_REGISTRY.register_processor(
