@@ -778,21 +778,20 @@ class OpenCUA_VisionTransformer(nn.Module):
         return self.rotary_pos_emb(seq_len)
 
     def rotary_pos_emb_thw(self, t, h, w):
+        # OpenCUA uses 1D RoPE: generate sequential position embeddings
+        # Follow Qwen2.5-VL structure but use 1D RoPE instead of 2D M-RoPE
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_tokens = t * llm_h * llm_w
-        # OpenCUA uses 1D RoPE: generate sequential position embeddings
+        # Generate 1D RoPE for total_tokens
         # rotary_pos_emb.forward(seqlen) returns [seqlen, dim] where dim = head_dim // 2
         rotary_pos_emb_full = self.rotary_pos_emb(total_tokens)
-        # Verify shape matches expected
-        actual_seqlen = rotary_pos_emb_full.shape[0]
-        if actual_seqlen != total_tokens:
+        # Verify shape
+        if rotary_pos_emb_full.shape[0] != total_tokens:
             raise RuntimeError(
                 f"rotary_pos_emb returned wrong size: expected {total_tokens}, "
-                f"got {actual_seqlen}. t={t}, h={h}, w={w}, "
-                f"llm_h={llm_h}, llm_w={llm_w}, "
-                f"rotary_pos_emb_full.shape={rotary_pos_emb_full.shape}, "
-                f"rotary_pos_emb_full.numel()={rotary_pos_emb_full.numel()}"
+                f"got {rotary_pos_emb_full.shape[0]}. t={t}, h={h}, w={w}, "
+                f"llm_h={llm_h}, llm_w={llm_w}"
             )
         if total_tokens % self.spatial_merge_unit != 0:
             raise RuntimeError(
@@ -800,6 +799,7 @@ class OpenCUA_VisionTransformer(nn.Module):
                 f"spatial_merge_unit={self.spatial_merge_unit}"
             )
         # Reshape to [total_tokens // spatial_merge_unit, spatial_merge_unit, dim]
+        # This matches Qwen2.5-VL's output shape for window attention indexing
         rotary_pos_emb = rotary_pos_emb_full.reshape(
             total_tokens // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -865,6 +865,7 @@ class OpenCUA_VisionTransformer(nn.Module):
             torch.tensor([h * w], dtype=torch.int32, device=rotary_pos_emb_thw.device),
             t,
         )
+        cu_seqlens_window_thw = cu_seqlens_window_thw.to(rotary_pos_emb_thw.device)
         return (
             rotary_pos_emb_thw,
             window_index_thw,
