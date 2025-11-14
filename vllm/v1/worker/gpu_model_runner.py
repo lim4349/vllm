@@ -1540,9 +1540,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                req.prompt_token_ids, req.prompt_embeds
-            )
+            # For multimodal models with MRoPE, use mrope_positions length instead of
+            # prompt_token_ids length, as visual tokens are included in mrope_positions
+            # but not in prompt_token_ids (which only has placeholder tokens)
+            if req.mrope_positions is not None:
+                num_prompt_tokens = req.mrope_positions.shape[1]
+            else:
+                num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                    req.prompt_token_ids, req.prompt_embeds
+                )
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
                 prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
