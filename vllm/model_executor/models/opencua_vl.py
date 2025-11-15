@@ -58,11 +58,10 @@ class OpenCUA_VLProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         # Use Kimi-VL processor for tokenizer and template
-        # Use AutoProcessor to load Kimi-VL processor dynamically
-        from transformers import AutoProcessor
-
+        # Pass None or ProcessorMixin to use AutoProcessor.from_pretrained
+        # which will automatically load the correct processor (Kimi-VL)
         return self.ctx.get_hf_processor(
-            AutoProcessor,
+            None,  # None means use AutoProcessor.from_pretrained
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
