@@ -2150,42 +2150,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
-            # Handle expanded embeddings (e.g., OpenCUA expands 1 placeholder
-            # to multiple visual tokens)
-            actual_embeds_len = inputs_embeds_scheduled.shape[0]
-            if actual_embeds_len > num_scheduled_tokens:
-                # Expanded embeddings: copy the full length
-                # Ensure self.inputs_embeds.gpu is large enough
-                if actual_embeds_len > self.inputs_embeds.gpu.shape[0]:
-                    # Resize if needed (should be rare)
-                    self.inputs_embeds.gpu = torch.empty(
-                        (actual_embeds_len, inputs_embeds_scheduled.shape[1]),
-                        dtype=inputs_embeds_scheduled.dtype,
-                        device=self.inputs_embeds.gpu.device,
-                    )
-                self.inputs_embeds.gpu[:actual_embeds_len].copy_(
-                    inputs_embeds_scheduled
-                )
-            else:
-                # Normal case: copy num_scheduled_tokens
-                self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
-                    inputs_embeds_scheduled
-                )
+            self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
+                inputs_embeds_scheduled
+            )
 
             input_ids = None
-            # Use actual_embeds_len if embeddings were expanded
-            actual_input_tokens = (
-                actual_embeds_len
-                if actual_embeds_len > num_scheduled_tokens
-                else num_input_tokens
-            )
-            inputs_embeds = self.inputs_embeds.gpu[:actual_input_tokens]
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             model_kwargs = {
-                **self._init_model_kwargs(
-                    actual_embeds_len
-                    if actual_embeds_len > num_scheduled_tokens
-                    else num_scheduled_tokens
-                ),
+                **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
         elif self.enable_prompt_embeds and is_first_rank:

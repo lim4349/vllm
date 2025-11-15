@@ -1831,6 +1831,34 @@ class OpenCUA_VLForConditionalGeneration(
         placeholder tokens (matching the number of visual tokens), we can use
         the default _merge_multimodal_embeddings which does in-place replacement.
         """
+        logger = init_logger(__name__)
+        
+        # Debug logging to verify embeddings matching
+        if multimodal_embeddings is not None and is_multimodal is not None:
+            from vllm.model_executor.models.utils import _flatten_embeddings
+            mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+            num_mm_tokens = mm_embeds_flat.shape[0]
+            num_placeholders = is_multimodal.sum().item()
+            
+            logger.info(
+                "OpenCUA get_input_embeddings - input_ids.shape=%s, "
+                "is_multimodal.sum()=%d, multimodal_embeddings tokens=%d, "
+                "match=%s",
+                input_ids.shape,
+                num_placeholders,
+                num_mm_tokens,
+                num_placeholders == num_mm_tokens,
+            )
+            
+            if num_placeholders != num_mm_tokens:
+                logger.warning(
+                    "OpenCUA get_input_embeddings - MISMATCH: "
+                    "is_multimodal.sum()=%d != multimodal_embeddings tokens=%d. "
+                    "This will cause incorrect embedding placement!",
+                    num_placeholders,
+                    num_mm_tokens,
+                )
+        
         # Use parent's default implementation (same as Qwen2.5-VL)
         return super().get_input_embeddings(
             input_ids=input_ids,
