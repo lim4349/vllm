@@ -570,6 +570,27 @@ def resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
+    # Force HuggingFace format for OpenCUA models to ensure correct
+    # placeholder processing and chat template behavior
+    # This matches HuggingFace's apply_chat_template behavior exactly
+    if hasattr(model_config, "hf_config") and hasattr(
+        model_config.hf_config, "model_type"
+    ):
+        if model_config.hf_config.model_type == "opencua":
+            if given_format == "auto":
+                logger.info(
+                    "OpenCUA model detected: forcing chat_template_content_format "
+                    "to 'huggingface' for correct placeholder processing"
+                )
+                return "huggingface"
+            elif given_format != "huggingface":
+                logger.warning(
+                    "OpenCUA model detected but chat_template_content_format is "
+                    "set to '%s'. For correct image recognition, use "
+                    "'huggingface' format.",
+                    given_format,
+                )
+
     if given_format != "auto":
         return given_format
 
