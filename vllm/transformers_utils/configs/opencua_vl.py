@@ -47,34 +47,10 @@ class OpenCUA_VLConfig(PretrainedConfig):
             text_config = Qwen2Config()
         self.text_config = text_config
         
-        # Set rope_scaling with mrope_section for vLLM to detect MRoPE support
-        # This ensures uses_mrope() returns True, which triggers
-        # get_mrope_input_positions()
-        rope_scaling = getattr(text_config, "rope_scaling", None)
-        if (
-            rope_scaling is None
-            or not isinstance(rope_scaling, dict)
-            or "mrope_section" not in rope_scaling
-        ):
-            head_dim = getattr(text_config, "head_dim", None) or (
-                text_config.hidden_size // text_config.num_attention_heads
-            )
-            section_size = (head_dim // 2) // 3
-            remainder = (head_dim // 2) % 3
-            mrope_section = [section_size] * 3
-            for i in range(remainder):
-                mrope_section[i] += 1
-            text_config.rope_scaling = {
-                "rope_type": "default",
-                "mrope_section": mrope_section,
-            }
-            # Log for debugging
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(
-                "OpenCUA_VLConfig - Set rope_scaling: %s",
-                text_config.rope_scaling,
-            )
+        # Preserve existing rope_scaling from HF config if present
+        # OpenCUA uses 1D RoPE, which should be handled via use_1d_rope flag
+        # and model implementation, not by forcing MRoPE (mrope_section) format
+        # If rope_scaling is already set in the config, we respect it as-is
 
         # HF 표준
         self.ignore_index = ignore_index
