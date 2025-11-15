@@ -1853,6 +1853,11 @@ class OpenCUA_VLForConditionalGeneration(
         # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
         feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
         
+        # vLLM may pass 1D input_ids (seq_len,) or 2D (batch_size, seq_len)
+        if input_ids.ndim == 1:
+            input_ids = input_ids.unsqueeze(0)  # (1, seq_len)
+            inputs_embeds = inputs_embeds.unsqueeze(0)  # (1, seq_len, embed_dim)
+        
         batch_size, sequence_length = input_ids.shape
         _, embed_dim = image_features.shape
         
