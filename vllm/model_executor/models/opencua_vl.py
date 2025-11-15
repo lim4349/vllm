@@ -2020,39 +2020,69 @@ class OpenCUA_VLForConditionalGeneration(
                     f"last 10: {positions[0, -10:].tolist()}"
                 )
         
-        # Log visual embeddings statistics at expected positions
-        if inputs_embeds is not None and inputs_embeds.shape[0] > 1365:
-            # Visual tokens should be at positions 22-1365
-            visual_embeds = inputs_embeds[22:1366]
-            visual_mean = visual_embeds.mean().item()
-            visual_std = visual_embeds.std().item()
-            visual_min = visual_embeds.min().item()
-            visual_max = visual_embeds.max().item()
-            
-            # Compare with text embeddings
-            text_before = inputs_embeds[0:22]
-            text_after = (
-                inputs_embeds[1366:1371]
-                if inputs_embeds.shape[0] > 1366
-                else None
+        # Log visual embeddings statistics at actual positions
+        # Use positions to determine where visual tokens are located
+        if inputs_embeds is not None and positions.shape[-1] > 0:
+            # Find visual token range from positions
+            # Visual tokens have positions matching get_mrope_input_positions
+            # For OpenCUA, visual positions are sequential (e.g., 12-1355)
+            pos_1d = (
+                positions[0] if positions.shape[0] > 0 else positions.squeeze(0)
             )
             
-            text_before_mean = text_before.mean().item()
-            text_after_mean = (
-                text_after.mean().item() if text_after is not None else None
-            )
+            # Find the first position that is not sequential from the start
+            # This indicates where visual tokens begin
+            visual_start_idx = None
+            visual_end_idx = None
             
-            logger.info(
-                "OpenCUA forward - visual embeddings stats at [22:1366]: "
-                "mean=%.4f, std=%.4f, min=%.4f, max=%.4f, "
-                "text_before[0:22] mean=%.4f, text_after[1366:] mean=%s",
-                visual_mean,
-                visual_std,
-                visual_min,
-                visual_max,
-                text_before_mean,
-                text_after_mean,
-            )
+            if len(pos_1d) > 1:
+                # Check for position jumps that indicate visual token boundaries
+                # Visual tokens should have sequential positions
+                for i in range(1, len(pos_1d)):
+                    pos_diff = pos_1d[i].item() - pos_1d[i-1].item()
+                    # If position jumps by more than 1, we found a boundary
+                    if pos_diff > 1:
+                        if visual_start_idx is None:
+                            # This might be the end of visual tokens
+                            visual_end_idx = i
+                        break
+                
+                # Alternative: use positions to find visual range
+                # Visual tokens should have positions matching
+                # get_mrope_input_positions
+                # For now, log at multiple potential locations
+                potential_starts = [12, 22]  # Common visual start positions
+                for start_idx in potential_starts:
+                    if start_idx < len(pos_1d):
+                        end_idx = start_idx + 1344  # num_visual_tokens
+                        if end_idx <= len(pos_1d):
+                            visual_embeds = inputs_embeds[start_idx:end_idx]
+                            visual_mean = visual_embeds.mean().item()
+                            visual_std = visual_embeds.std().item()
+                            visual_min = visual_embeds.min().item()
+                            visual_max = visual_embeds.max().item()
+                            
+                            # Check if this looks like visual embeddings
+                            # Visual embeddings typically have different
+                            # stats than text
+                            pos_at_start = pos_1d[start_idx].item()
+                            pos_at_end = (
+                                pos_1d[end_idx-1].item() if end_idx > 0 else None
+                            )
+                            
+                            logger.info(
+                                "OpenCUA forward - visual embeddings stats at "
+                                "[%d:%d] (positions %s-%s): "
+                                "mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
+                                start_idx,
+                                end_idx,
+                                pos_at_start,
+                                pos_at_end,
+                                visual_mean,
+                                visual_std,
+                                visual_min,
+                                visual_max,
+                            )
         
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
