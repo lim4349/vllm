@@ -192,8 +192,13 @@ class OpenCUA_VLMultiModalProcessor(BaseMultiModalProcessor[OpenCUA_VLProcessing
         merge_size = hf_config.spatial_merge_size
 
         def get_replacement(item_idx: int, modality: str):
-            # Qwen2.5-VL style: directly access out_mm_kwargs[modality][item_idx]
-            # This assumes the modality exists in out_mm_kwargs when called
+            # Safely check if modality exists in out_mm_kwargs
+            # Return empty list if modality is not present
+            if modality not in out_mm_kwargs:
+                return []
+            if item_idx >= len(out_mm_kwargs[modality]):
+                return []
+
             out_item = out_mm_kwargs[modality][item_idx]
             grid_key = f"{modality}_grid_thw"
             grid_thw = out_item[grid_key].data
