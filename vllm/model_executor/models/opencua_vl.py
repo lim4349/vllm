@@ -1916,17 +1916,32 @@ class OpenCUA_VLForConditionalGeneration(
         
         # If filtered, try to get full embeddings from cache
         if is_filtered and num_placeholders == 1:
-            # Look for full embeddings in cache (shape[0] > 1)
+            # Look for full embeddings in cache
+            # OpenCUA typically has ~1344 visual tokens per image
+            # Find embeddings with shape[0] closest to 1344
             full_embeddings = None
+            best_match = None
+            best_diff = float("inf")
+            expected_tokens = 1344  # Typical OpenCUA visual tokens per image
+            
             for cached_emb in self._full_mm_embeddings_cache.values():
-                if isinstance(cached_emb, torch.Tensor) and cached_emb.shape[0] > 1:
-                    full_embeddings = (cached_emb,)
-                    logger.info(
-                        "OpenCUA get_input_embeddings - "
-                        "using cached full embeddings: shape=%s",
-                        cached_emb.shape,
-                    )
-                    break
+                if isinstance(cached_emb, torch.Tensor):
+                    cached_len = cached_emb.shape[0]
+                    # Prefer embeddings close to expected size (1344)
+                    if cached_len > 1:
+                        diff = abs(cached_len - expected_tokens)
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_match = cached_emb
+            
+            if best_match is not None:
+                full_embeddings = (best_match,)
+                logger.info(
+                    "OpenCUA get_input_embeddings - "
+                    "using cached full embeddings: shape=%s (expected ~%d)",
+                    best_match.shape,
+                    expected_tokens,
+                )
             
             if full_embeddings is not None:
                 # Replace filtered embeddings with full embeddings
@@ -2006,13 +2021,10 @@ class OpenCUA_VLForConditionalGeneration(
                 handle_oov_mm_token=handle_oov_mm_token,
             )
         
-        # Store the actual length for use in forward()
+        # Store the actual length for logging/debugging
+        # Note: forward() uses inputs_embeds.shape[0] as source of truth
         result_len = result.shape[0]
-        if (
-            self._last_embeddings_length is None
-            or result_len > self._last_embeddings_length
-        ):
-            self._last_embeddings_length = result_len
+        self._last_embeddings_length = result_len
         
         logger.info(
             "OpenCUA get_input_embeddings - expanded: "
@@ -2058,12 +2070,9 @@ class OpenCUA_VLForConditionalGeneration(
         if inputs_embeds is not None and positions.shape[-1] > 0:
             current_len = positions.shape[-1]
             inputs_embeds_len = inputs_embeds.shape[0]
-            # Use the actual length from get_input_embeddings if available
-            target_len = (
-                self._last_embeddings_length
-                if self._last_embeddings_length is not None
-                else inputs_embeds_len
-            )
+            # Use inputs_embeds.shape[0] as the source of truth
+            # _last_embeddings_length is only used for logging/debugging
+            target_len = inputs_embeds_len
             max_pos = positions[0, -1].item()
             
             logger.info(
@@ -2093,12 +2102,10 @@ class OpenCUA_VLForConditionalGeneration(
                     
                     logger.info(
                         "OpenCUA forward - expanded positions from %d to %d "
-                        "(added %d visual token positions, "
-                        "using _last_embeddings_length=%d)",
+                        "(added %d positions to match inputs_embeds)",
                         current_len,
                         target_len,
                         remaining_len,
-                        self._last_embeddings_length or inputs_embeds_len,
                     )
             elif current_len > target_len:
                 # Trim positions if longer than target
