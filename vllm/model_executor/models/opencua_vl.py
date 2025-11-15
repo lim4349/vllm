@@ -1214,6 +1214,12 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         """Override to add guard log for placeholder count after tokenization."""
         logger = init_logger(__name__)
 
+        # Log prompt text for debugging
+        logger.info(
+            "OpenCUA _apply_hf_processor_text_mm - prompt_text (first 500 chars): %s",
+            prompt_text[:500] if len(prompt_text) > 500 else prompt_text,
+        )
+
         # Call parent method to perform actual processing
         prompt_ids, processed_data, is_update_applied = (
             super()._apply_hf_processor_text_mm(
@@ -1224,9 +1230,16 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             )
         )
 
+        # Log prompt_ids for debugging
+        tokenizer = self.info.get_tokenizer()
+        prompt_text_from_ids = tokenizer.decode(prompt_ids[:50], skip_special_tokens=False)
+        logger.info(
+            "OpenCUA _apply_hf_processor_text_mm - prompt_ids (first 50 tokens, decoded): %s",
+            prompt_text_from_ids,
+        )
+
         # GUARD LOG: Check placeholder count after tokenization
         # This should be exactly 1 per image/video, not num_tokens
-        tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         media_placeholder_id = vocab.get("<|media_placeholder|>", None)
 
