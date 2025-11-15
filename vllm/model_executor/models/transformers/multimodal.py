@@ -186,7 +186,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             # the prompt is the tokenized ids which is not supported
             # by the hf_processor, which is why we would need to decode the ids
             # into string
-            prompt = hf_processor.decode(prompt)
+            # Use tokenizer instead of hf_processor for decoding, as hf_processor
+            # may not have a decode method or may decode incorrectly
+            tokenizer = self.info.get_tokenizer()
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
 
         # Bypass cached processor and always apply to the full set of mm inputs
         # NOTE: we can't just set caching=False because base class method
