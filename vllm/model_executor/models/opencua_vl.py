@@ -2084,6 +2084,40 @@ class OpenCUA_VLForConditionalGeneration(
                     f"last 10: {positions[0, -10:].tolist()}"
                 )
         
+        # Log visual embeddings statistics at expected positions
+        if inputs_embeds is not None and inputs_embeds.shape[0] > 1365:
+            # Visual tokens should be at positions 22-1365
+            visual_embeds = inputs_embeds[22:1366]
+            visual_mean = visual_embeds.mean().item()
+            visual_std = visual_embeds.std().item()
+            visual_min = visual_embeds.min().item()
+            visual_max = visual_embeds.max().item()
+            
+            # Compare with text embeddings
+            text_before = inputs_embeds[0:22]
+            text_after = (
+                inputs_embeds[1366:1371]
+                if inputs_embeds.shape[0] > 1366
+                else None
+            )
+            
+            text_before_mean = text_before.mean().item()
+            text_after_mean = (
+                text_after.mean().item() if text_after is not None else None
+            )
+            
+            logger.info(
+                "OpenCUA forward - visual embeddings stats at [22:1366]: "
+                "mean=%.4f, std=%.4f, min=%.4f, max=%.4f, "
+                "text_before[0:22] mean=%.4f, text_after[1366:] mean=%s",
+                visual_mean,
+                visual_std,
+                visual_min,
+                visual_max,
+                text_before_mean,
+                text_after_mean,
+            )
+        
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
             "inputs_embeds shape: %s, positions: %s",
