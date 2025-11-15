@@ -2102,11 +2102,26 @@ class OpenCUA_VLForConditionalGeneration(
                         positions = self._full_mrope_positions[:, :target_len].to(
                             device=positions.device, dtype=positions.dtype
                         )
+                        # Log positions to verify visual tokens get correct positions
+                        visual_start_pos = (
+                            positions[0, 22].item()
+                            if positions.shape[-1] > 22
+                            else None
+                        )
+                        visual_end_pos = (
+                            positions[0, 1365].item()
+                            if positions.shape[-1] > 1365
+                            else None
+                        )
                         logger.info(
                             "OpenCUA forward - using full mrope positions: "
-                            "expanded from %d to %d (using stored positions)",
+                            "expanded from %d to %d (using stored positions), "
+                            "visual_start_pos=%s (should be 22), "
+                            "visual_end_pos=%s (should be 1365)",
                             current_len,
                             target_len,
+                            visual_start_pos,
+                            visual_end_pos,
                         )
                     else:
                         # Fallback: generate sequential positions
@@ -2136,13 +2151,39 @@ class OpenCUA_VLForConditionalGeneration(
                     target_len,
                 )
         
+        # Log positions for debugging: first 10, around visual tokens (22-1365), and last 10
+        pos_log = []
+        if positions.shape[-1] > 0:
+            pos_log.append(f"first 10: {positions[0, :10].tolist()}")
+            if positions.shape[-1] > 30:
+                # Log positions around visual token start (position 22)
+                visual_start_idx = 20
+                visual_end_idx = min(30, positions.shape[-1])
+                visual_pos_slice = positions[0, visual_start_idx:visual_end_idx]
+                pos_log.append(
+                    "around visual start (idx 20-30): "
+                    f"{visual_pos_slice.tolist()}"
+                )
+            if positions.shape[-1] > 1365:
+                # Log positions around visual token end (position 1365)
+                visual_end_start = 1360
+                visual_end_end = min(1371, positions.shape[-1])
+                pos_log.append(
+                    f"around visual end (idx 1360-1371): "
+                    f"{positions[0, visual_end_start:visual_end_end].tolist()}"
+                )
+            if positions.shape[-1] > 10:
+                pos_log.append(
+                    f"last 10: {positions[0, -10:].tolist()}"
+                )
+        
         logger.info(
             "OpenCUA forward called - input_ids shape: %s, positions shape: %s, "
-            "inputs_embeds shape: %s, positions (first 10): %s",
+            "inputs_embeds shape: %s, positions: %s",
             input_ids.shape if input_ids is not None else None,
             positions.shape,
             inputs_embeds.shape if inputs_embeds is not None else None,
-            positions[:, :10].tolist() if positions.shape[-1] > 0 else [],
+            " | ".join(pos_log) if pos_log else "[]",
         )
 
         if intermediate_tensors is not None:
