@@ -1902,32 +1902,49 @@ class OpenCUA_VLForConditionalGeneration(
             is_mm_indices = torch.where(is_multimodal)[0]
             if len(is_mm_indices) > 0:
                 first_mm_idx = is_mm_indices[0].item()
-                # Compare first visual embedding from multimodal_embeddings
-                # with the embedding at the expected position in result
-                mm_first = mm_embeds_flat[0:1]  # First visual embedding
-                result_at_mm = result[first_mm_idx:first_mm_idx + 1]  # Embedding at first mm position
+                last_mm_idx = is_mm_indices[-1].item()
+                
+                # Compare first and last visual embeddings
+                mm_first = mm_embeds_flat[0:1]
+                mm_last = mm_embeds_flat[-1:]
+                result_at_first = result[first_mm_idx:first_mm_idx + 1]
+                result_at_last = result[last_mm_idx:last_mm_idx + 1]
                 
                 # Check if they match (allowing for small numerical differences)
-                diff = (mm_first - result_at_mm).abs().max().item()
+                diff_first = (mm_first - result_at_first).abs().max().item()
+                diff_last = (mm_last - result_at_last).abs().max().item()
                 match_threshold = 1e-3
+                
+                # Log statistics about visual embeddings
+                mm_mean = mm_embeds_flat.mean().item()
+                mm_std = mm_embeds_flat.std().item()
+                mm_min = mm_embeds_flat.min().item()
+                mm_max = mm_embeds_flat.max().item()
                 
                 logger.info(
                     "OpenCUA get_input_embeddings - visual embedding verification: "
-                    "first_mm_idx=%d, embedding diff=%.6f, match=%s "
-                    "(diff < %.6f)",
+                    "first_mm_idx=%d, last_mm_idx=%d, "
+                    "diff_first=%.6f, diff_last=%.6f, match=%s, "
+                    "mm_stats: mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
                     first_mm_idx,
-                    diff,
-                    diff < match_threshold,
-                    match_threshold,
+                    last_mm_idx,
+                    diff_first,
+                    diff_last,
+                    diff_first < match_threshold and diff_last < match_threshold,
+                    mm_mean,
+                    mm_std,
+                    mm_min,
+                    mm_max,
                 )
                 
-                if diff >= match_threshold:
+                if diff_first >= match_threshold or diff_last >= match_threshold:
                     logger.warning(
                         "OpenCUA get_input_embeddings - visual embeddings mismatch: "
-                        "multimodal_embeddings[0] does not match result[%d]. "
-                        "diff=%.6f. Visual embeddings may not be correctly placed!",
-                        first_mm_idx,
-                        diff,
+                        "multimodal_embeddings does not match result at positions. "
+                        "diff_first=%.6f, diff_last=%.6f. "
+                        "Visual embeddings may not be correctly placed!",
+                        diff_first,
+                        diff_last,
                     )
         
         return result
