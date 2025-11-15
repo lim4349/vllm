@@ -1882,12 +1882,55 @@ class OpenCUA_VLForConditionalGeneration(
                 )
         
         # Use parent's default implementation (same as Qwen2.5-VL)
-        return super().get_input_embeddings(
+        result = super().get_input_embeddings(
             input_ids=input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
+        
+        # Verify visual embeddings are correctly placed
+        if (
+            multimodal_embeddings is not None
+            and len(multimodal_embeddings) > 0
+            and is_multimodal is not None
+        ):
+            from vllm.model_executor.models.utils import _flatten_embeddings
+            mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+            
+            # Check if visual embeddings match at expected positions
+            is_mm_indices = torch.where(is_multimodal)[0]
+            if len(is_mm_indices) > 0:
+                first_mm_idx = is_mm_indices[0].item()
+                # Compare first visual embedding from multimodal_embeddings
+                # with the embedding at the expected position in result
+                mm_first = mm_embeds_flat[0:1]  # First visual embedding
+                result_at_mm = result[first_mm_idx:first_mm_idx + 1]  # Embedding at first mm position
+                
+                # Check if they match (allowing for small numerical differences)
+                diff = (mm_first - result_at_mm).abs().max().item()
+                match_threshold = 1e-3
+                
+                logger.info(
+                    "OpenCUA get_input_embeddings - visual embedding verification: "
+                    "first_mm_idx=%d, embedding diff=%.6f, match=%s "
+                    "(diff < %.6f)",
+                    first_mm_idx,
+                    diff,
+                    diff < match_threshold,
+                    match_threshold,
+                )
+                
+                if diff >= match_threshold:
+                    logger.warning(
+                        "OpenCUA get_input_embeddings - visual embeddings mismatch: "
+                        "multimodal_embeddings[0] does not match result[%d]. "
+                        "diff=%.6f. Visual embeddings may not be correctly placed!",
+                        first_mm_idx,
+                        diff,
+                    )
+        
+        return result
 
     def forward(
         self,
