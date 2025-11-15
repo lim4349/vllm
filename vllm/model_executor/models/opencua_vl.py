@@ -1909,14 +1909,42 @@ class OpenCUA_VLForConditionalGeneration(
             ):
                 # Use stored full positions from get_mrope_input_positions
                 # This ensures visual tokens get correct positions
+                old_positions = positions.clone()
                 positions = self._full_mrope_positions[:, :target_len].to(
                     device=positions.device, dtype=positions.dtype
                 )
+                # Log comparison to verify positions were corrected
+                old_visual_start = (
+                    old_positions[0, 12].item()
+                    if old_positions.shape[-1] > 12
+                    else None
+                )
+                new_visual_start = (
+                    positions[0, 12].item()
+                    if positions.shape[-1] > 12
+                    else None
+                )
+                old_visual_end = (
+                    old_positions[0, 1355].item()
+                    if old_positions.shape[-1] > 1355
+                    else None
+                )
+                new_visual_end = (
+                    positions[0, 1355].item()
+                    if positions.shape[-1] > 1355
+                    else None
+                )
                 logger.info(
                     "OpenCUA forward - using full mrope positions: "
-                    "replaced positions (len %d -> %d, using stored positions)",
+                    "replaced positions (len %d -> %d, using stored positions), "
+                    "old visual[12]=%s, new visual[12]=%s (should be 12), "
+                    "old visual[1355]=%s, new visual[1355]=%s (should be 1355)",
                     current_len,
                     target_len,
+                    old_visual_start,
+                    new_visual_start,
+                    old_visual_end,
+                    new_visual_end,
                 )
             elif current_len < target_len:
                 # Expand positions to match the actual embeddings length
