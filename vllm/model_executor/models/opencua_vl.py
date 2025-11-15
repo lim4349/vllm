@@ -2222,10 +2222,10 @@ class OpenCUA_VLForConditionalGeneration(
             )
 
             llm_pos_ids_list.append(visual_positions)
-            # After replacement, the placeholder token at position ed is replaced with
-            # num_visual_tokens tokens in the actual sequence.
-            # But in input_tokens, we still have the placeholder, so we need to
-            # skip it (ed + 1) to find the next placeholder.
+            # Qwen2.5-VL style: _get_prompt_updates already expanded 1 placeholder
+            # to num_visual_tokens placeholders in input_tokens.
+            # So we need to skip all num_visual_tokens placeholders to find the next
+            # text segment.
             # The st_idx for positions is automatically updated by
             # llm_pos_ids_list[-1].max() + 1 in the next iteration.
             
@@ -2236,12 +2236,13 @@ class OpenCUA_VLForConditionalGeneration(
                 ed,
                 num_visual_tokens,
                 st,
-                ed + 1,
+                ed + num_visual_tokens,
                 visual_positions.max().item() + 1,
             )
             
-            # In input_tokens, skip the placeholder at ed to find next placeholder
-            st = ed + 1
+            # In input_tokens, skip all expanded placeholder tokens (num_visual_tokens)
+            # to find the next text segment
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
