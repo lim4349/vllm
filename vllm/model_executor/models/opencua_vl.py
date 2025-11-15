@@ -1844,14 +1844,22 @@ class OpenCUA_VLForConditionalGeneration(
             num_mm_tokens = mm_embeds_flat.shape[0]
             num_placeholders = is_multimodal.sum().item()
             
+            # Find where is_multimodal is True
+            is_mm_indices = torch.where(is_multimodal)[0]
+            first_mm_idx = is_mm_indices[0].item() if len(is_mm_indices) > 0 else None
+            last_mm_idx = is_mm_indices[-1].item() if len(is_mm_indices) > 0 else None
+            
             logger.info(
                 "OpenCUA get_input_embeddings - input_ids.shape=%s, "
                 "is_multimodal.sum()=%d, multimodal_embeddings tokens=%d, "
-                "match=%s",
+                "match=%s, is_multimodal True at indices [%s:%s] "
+                "(should be [22:1366] for visual tokens)",
                 input_ids.shape,
                 num_placeholders,
                 num_mm_tokens,
                 num_placeholders == num_mm_tokens,
+                first_mm_idx,
+                last_mm_idx + 1 if last_mm_idx is not None else None,
             )
             
             if num_placeholders != num_mm_tokens:
@@ -1861,6 +1869,16 @@ class OpenCUA_VLForConditionalGeneration(
                     "This will cause incorrect embedding placement!",
                     num_placeholders,
                     num_mm_tokens,
+                )
+            
+            # Verify is_multimodal positions match expected visual token positions
+            if first_mm_idx != 22 or (last_mm_idx is not None and last_mm_idx != 1365):
+                logger.warning(
+                    "OpenCUA get_input_embeddings - POSITION MISMATCH: "
+                    "is_multimodal True at [%s:%s], but expected [22:1366] "
+                    "for visual tokens. This will cause incorrect embedding placement!",
+                    first_mm_idx,
+                    last_mm_idx + 1 if last_mm_idx is not None else None,
                 )
         
         # Use parent's default implementation (same as Qwen2.5-VL)
