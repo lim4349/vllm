@@ -1886,7 +1886,13 @@ class OpenCUA_VLForConditionalGeneration(
         
         # Check if embeddings were filtered (HuggingFace style needs full embeddings)
         # Find placeholder positions in input_ids
-        placeholder_positions = torch.where(input_ids == image_token_index)[1]
+        # Handle both 1D and 2D input_ids
+        placeholder_where = torch.where(input_ids == image_token_index)
+        if input_ids.ndim == 1:
+            placeholder_positions = placeholder_where[0]
+        else:
+            placeholder_positions = placeholder_where[1]
+        
         if len(placeholder_positions) > 0 and len(feature_lengths) > 0:
             # If we have cached visual token counts, use them to reconstruct
             # full feature_lengths
