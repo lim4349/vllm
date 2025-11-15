@@ -1134,7 +1134,35 @@ def _get_full_multimodal_text_prompt(
 
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
-    return "\n".join(missing_placeholders + [text_prompt])
+    final_prompt = "\n".join(missing_placeholders + [text_prompt])
+    
+    # Log for OpenCUA debugging
+    if missing_placeholders:
+        missing_placeholders_sample = (
+            missing_placeholders[:5]
+            if len(missing_placeholders) > 5
+            else missing_placeholders
+        )
+        text_prompt_sample = (
+            text_prompt[:200] if len(text_prompt) > 200 else text_prompt
+        )
+        final_prompt_sample = (
+            final_prompt[:200] if len(final_prompt) > 200 else final_prompt
+        )
+        logger.info(
+            "OpenCUA _get_full_multimodal_text_prompt - "
+            "placeholder_storage: %s, texts: %s, interleave_strings: %s, "
+            "missing_placeholders: %s, text_prompt: %s, "
+            "final_prompt (first 200 chars): %s",
+            placeholder_storage,
+            texts,
+            interleave_strings,
+            missing_placeholders_sample,
+            text_prompt_sample,
+            final_prompt_sample,
+        )
+    
+    return final_prompt
 
 
 # No need to validate using Pydantic again
@@ -1616,13 +1644,47 @@ def apply_hf_chat_template(
     )
 
     try:
-        return tokenizer.apply_chat_template(
+        # Log for OpenCUA debugging
+        if (
+            hasattr(model_config, "hf_config")
+            and hasattr(model_config.hf_config, "model_type")
+            and model_config.hf_config.model_type == "opencua"
+        ):
+            conv_content_sample = "empty"
+            if conversation:
+                first_content = conversation[0].get("content", "")
+                if isinstance(first_content, str):
+                    conv_content_sample = first_content[:200]
+                else:
+                    conv_content_sample = str(first_content)[:200]
+            logger.info(
+                "OpenCUA apply_hf_chat_template - conversation: %s, "
+                "conversation[0] content (first 200 chars): %s",
+                [msg.get("role", "unknown") for msg in conversation],
+                conv_content_sample,
+            )
+        
+        result = tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
             tokenize=False,
             **resolved_kwargs,
         )
+        
+        # Log for OpenCUA debugging
+        if (
+            hasattr(model_config, "hf_config")
+            and hasattr(model_config.hf_config, "model_type")
+            and model_config.hf_config.model_type == "opencua"
+        ):
+            result_sample = result[:500] if len(result) > 500 else result
+            logger.info(
+                "OpenCUA apply_hf_chat_template result (first 500 chars): %s",
+                result_sample,
+            )
+        
+        return result
 
     # External library exceptions can sometimes occur despite the framework's
     # internal exception management capabilities.
