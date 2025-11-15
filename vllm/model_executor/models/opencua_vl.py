@@ -1328,10 +1328,18 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         }
 
         def get_replacement_opencua(item_idx: int, modality: str):
-            # HuggingFace OpenCUA style: Keep 1 placeholder token
-            # The expansion will be done in get_input_embeddings using
-            # _merge_input_ids_with_image_features logic
-            return [placeholder[modality]]
+            # Qwen2.5-VL style: Expand 1 placeholder to multiple placeholder tokens
+            # This matches the number of visual tokens that will replace them
+            # This works with vLLM's chunked processing architecture
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            
+            # Calculate number of visual tokens after spatial merging
+            merge_length = image_processor.merge_size**2
+            num_tokens = int(grid_thw.prod()) // merge_length
+            
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
@@ -1833,198 +1841,20 @@ class OpenCUA_VLForConditionalGeneration(
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """
-        HuggingFace OpenCUA style: Implement _merge_input_ids_with_image_features logic.
+        Qwen2.5-VL style: Use default implementation.
         
-        Unlike Qwen2.5-VL, OpenCUA keeps 1 placeholder token and expands it during
-        embedding merge using cumsum-based position calculation.
+        Since _get_prompt_updates already expands 1 placeholder to multiple
+        placeholder tokens (matching the number of visual tokens), we can use
+        the default _merge_multimodal_embeddings which does in-place replacement.
+        This works with vLLM's chunked processing architecture.
         """
-        logger = init_logger(__name__)
-        
-        # Get text embeddings first
-        inputs_embeds = self._get_text_embeddings(
-            input_ids,
-            self.get_language_model().get_input_embeddings,
+        # Use parent's default implementation (same as Qwen2.5-VL)
+        return super().get_input_embeddings(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
-        
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-        
-        if is_multimodal is None:
-            raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
-        
-        # HuggingFace OpenCUA style: _merge_input_ids_with_image_features
-        from vllm.model_executor.models.utils import _flatten_embeddings
-        
-        # Log multimodal_embeddings before processing
-        mm_shapes = (
-            [emb.shape for emb in multimodal_embeddings]
-            if multimodal_embeddings
-            else []
-        )
-        logger.info(
-            "OpenCUA get_input_embeddings - multimodal_embeddings: "
-            "len=%d, shapes=%s",
-            len(multimodal_embeddings),
-            mm_shapes,
-        )
-        
-        image_features = _flatten_embeddings(multimodal_embeddings)
-        image_token_index = self.config.media_placeholder_token_id
-        
-        # Calculate feature_lengths for each image
-        # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
-        # NOTE: _gather_mm_embeddings may filter embeddings based on
-        # num_scheduled_tokens, so we need to reconstruct full feature_lengths
-        # using cached _visual_token_counts from get_mrope_input_positions
-        feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
-        
-        # Check if embeddings were filtered (HuggingFace style needs full embeddings)
-        # Find placeholder positions in input_ids
-        # Handle both 1D and 2D input_ids
-        placeholder_where = torch.where(input_ids == image_token_index)
-        if input_ids.ndim == 1:
-            placeholder_positions = placeholder_where[0]
-        else:
-            placeholder_positions = placeholder_where[1]
-        
-        if len(placeholder_positions) > 0 and len(feature_lengths) > 0:
-            # If we have cached visual token counts, use them to reconstruct
-            # full feature_lengths
-            reconstructed_lengths = []
-            for i, pos in enumerate(placeholder_positions):
-                pos_item = pos.item()
-                if pos_item in self._visual_token_counts:
-                    cached_count = self._visual_token_counts[pos_item]
-                    # If filtered embeddings are smaller, use cached count
-                    if i < len(feature_lengths) and feature_lengths[i] < cached_count:
-                        reconstructed_lengths.append(cached_count)
-                        logger.info(
-                            "OpenCUA get_input_embeddings - reconstructing "
-                            "feature_lengths: placeholder at pos %d, "
-                            "filtered=%d, cached=%d",
-                            pos_item,
-                            feature_lengths[i],
-                            cached_count,
-                        )
-                    else:
-                        reconstructed_lengths.append(feature_lengths[i])
-                else:
-                    # No cache, use filtered length
-                    if i < len(feature_lengths):
-                        reconstructed_lengths.append(feature_lengths[i])
-            
-            if reconstructed_lengths != feature_lengths:
-                feature_lengths = reconstructed_lengths
-                logger.info(
-                    "OpenCUA get_input_embeddings - reconstructed "
-                    "feature_lengths: %s -> %s",
-                    [emb.shape[0] for emb in multimodal_embeddings],
-                    feature_lengths,
-                )
-        
-        logger.info(
-            "OpenCUA get_input_embeddings - feature_lengths=%s, "
-            "image_features.shape=%s",
-            feature_lengths,
-            image_features.shape,
-        )
-        
-        # vLLM may pass 1D input_ids (seq_len,) or 2D (batch_size, seq_len)
-        if input_ids.ndim == 1:
-            input_ids = input_ids.unsqueeze(0)  # (1, seq_len)
-            inputs_embeds = inputs_embeds.unsqueeze(0)  # (1, seq_len, embed_dim)
-        
-        batch_size, sequence_length = input_ids.shape
-        _, embed_dim = image_features.shape
-        
-        # 1. Create _token_occupation_table
-        # Each placeholder token occupies feature_lengths[i] positions
-        _token_occupation_table = torch.ones_like(input_ids)
-        placeholder_indices = torch.where(input_ids == image_token_index)
-        
-        if len(placeholder_indices[0]) > 0:
-            # Map placeholder positions to feature_lengths
-            # In vLLM, placeholders are processed in order
-            placeholder_count = 0
-            for batch_idx in range(batch_size):
-                batch_placeholders = torch.where(
-                    input_ids[batch_idx] == image_token_index
-                )[0]
-                for pos_idx in batch_placeholders:
-                    if placeholder_count < len(feature_lengths):
-                        _token_occupation_table[
-                            batch_idx, pos_idx
-                        ] = feature_lengths[placeholder_count]
-                        placeholder_count += 1
-        
-        max_embed_dim = _token_occupation_table.sum(-1).max().item()
-        
-        # 2. Compute new positions for text tokens
-        new_token_positions = torch.cumsum(_token_occupation_table, -1) - 1
-        batch_indices, non_image_indices = torch.where(
-            input_ids != image_token_index
-        )
-        text_to_overwrite = new_token_positions[
-            batch_indices, non_image_indices
-        ]
-        
-        # 3. Create final embedding tensor
-        final_embedding = torch.zeros(
-            batch_size, max_embed_dim, embed_dim,
-            dtype=inputs_embeds.dtype, device=inputs_embeds.device
-        )
-        
-        # 4. Fill text embeddings at new positions
-        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
-            batch_indices, non_image_indices
-        ]
-        
-        # 5. Fill image embeddings at remaining positions
-        image_to_overwrite = torch.full(
-            (batch_size, max_embed_dim),
-            True,
-            dtype=torch.bool,
-            device=inputs_embeds.device,
-        )
-        image_to_overwrite[batch_indices, text_to_overwrite] = False
-        
-        # Ensure we have the right number of image positions
-        num_image_positions = image_to_overwrite.sum()
-        if num_image_positions != image_features.shape[0]:
-            raise ValueError(
-                f"Image positions mismatch: {num_image_positions} != "
-                f"{image_features.shape[0]}"
-            )
-        
-        final_embedding[image_to_overwrite] = image_features.contiguous().to(
-            inputs_embeds.device
-        )
-        
-        # vLLM expects 2D tensor (seq_len, embed_dim), not 3D
-        # (batch, seq_len, embed_dim). Since vLLM processes one sequence at a
-        # time, we take the first batch
-        final_embedding_2d = final_embedding[0]  # (max_embed_dim, embed_dim)
-        
-        logger.info(
-            "OpenCUA get_input_embeddings - HuggingFace style merge: "
-            "input_ids.shape=%s, inputs_embeds.shape=%s, "
-            "final_embedding.shape=%s, final_embedding_2d.shape=%s, "
-            "image_features.shape=%s, feature_lengths=%s",
-            input_ids.shape,
-            inputs_embeds.shape,
-            final_embedding.shape,
-            final_embedding_2d.shape,
-            image_features.shape,
-            feature_lengths,
-        )
-        
-        return final_embedding_2d
 
     def forward(
         self,
@@ -2449,9 +2279,10 @@ class OpenCUA_VLForConditionalGeneration(
             )
 
             llm_pos_ids_list.append(visual_positions)
-            # HuggingFace OpenCUA style: _get_prompt_updates keeps 1 placeholder token
-            # The expansion is done in get_input_embeddings using cumsum logic.
-            # So we only need to skip 1 placeholder token to find the next text segment.
+            # Qwen2.5-VL style: _get_prompt_updates already expanded 1 placeholder
+            # to num_visual_tokens placeholders in input_tokens.
+            # So we need to skip all num_visual_tokens placeholders to find the next
+            # text segment.
             # The st_idx for positions is automatically updated by
             # llm_pos_ids_list[-1].max() + 1 in the next iteration.
             
@@ -2462,12 +2293,13 @@ class OpenCUA_VLForConditionalGeneration(
                 ed,
                 num_visual_tokens,
                 st,
-                ed + 1,
+                ed + num_visual_tokens,
                 visual_positions.max().item() + 1,
             )
             
-            # In input_tokens, skip the single placeholder token to find next segment
-            st = ed + 1
+            # In input_tokens, skip all expanded placeholder tokens (num_visual_tokens)
+            # to find the next text segment
+            st = ed + num_visual_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
