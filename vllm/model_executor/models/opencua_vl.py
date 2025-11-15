@@ -1328,13 +1328,17 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         }
 
         def get_replacement_opencua(item_idx: int, modality: str):
-            # CRITICAL FIX: Prompt text should have only 1 placeholder token,
-            # not num_tokens. The PlaceholderRange.length is automatically set
-            # from the multimodal embeddings count returned by
-            # get_multimodal_embeddings. We return only 1 placeholder here to
-            # ensure the prompt text has exactly 1 placeholder, matching the
-            # expected behavior.
-            return [placeholder[modality]]
+            # Qwen2.5-VL style: Expand 1 placeholder to multiple placeholder tokens
+            # This matches the number of visual tokens that will replace them
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            
+            # Calculate number of visual tokens after spatial merging
+            merge_length = image_processor.merge_size**2
+            num_tokens = int(grid_thw.prod()) // merge_length
+            
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
@@ -1410,14 +1414,9 @@ class OpenCUA_VLForConditionalGeneration(
         self.config = config
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
-        # Store the actual length of embeddings returned by get_input_embeddings
-        # This is needed because _preprocess truncates to num_scheduled_tokens
-        self._last_embeddings_length: int | None = None
-        # Store full multimodal embeddings from get_multimodal_embeddings
-        # Key: mm_hash (from encoder_cache), Value: full embeddings tensor
-        self._full_mm_embeddings_cache: dict[str, torch.Tensor] = {}
         # Store full positions from get_mrope_input_positions
         # This allows forward() to use the correct positions for visual tokens
+        # when positions are truncated by num_scheduled_tokens
         self._full_mrope_positions: torch.Tensor | None = None
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
@@ -1815,24 +1814,6 @@ class OpenCUA_VLForConditionalGeneration(
                 video_embeddings = self._process_video_input(multimodal_input)
                 multimodal_embeddings += video_embeddings
         
-        # Cache full embeddings by creating a hash from kwargs
-        # This allows get_input_embeddings to retrieve full embeddings
-        # when filtered embeddings are passed
-        import hashlib
-        import json
-        cache_key = hashlib.sha256(
-            json.dumps(
-                {k: str(v) for k, v in sorted(kwargs.items())},
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
-        
-        # Store full embeddings for each item
-        for i, emb in enumerate(multimodal_embeddings):
-            if isinstance(emb, torch.Tensor):
-                item_key = f"{cache_key}_{i}"
-                self._full_mm_embeddings_cache[item_key] = emb
-        
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1844,203 +1825,19 @@ class OpenCUA_VLForConditionalGeneration(
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """
-        Override to expand placeholder tokens to visual tokens.
+        Qwen2.5-VL style: Use default implementation.
         
-        OpenCUA uses 1 placeholder token that expands to multiple visual tokens
-        (e.g., 1344 tokens). The default _merge_multimodal_embeddings only
-        replaces placeholders in-place, but we need to expand the sequence.
+        Since _get_prompt_updates already expands 1 placeholder to multiple
+        placeholder tokens (matching the number of visual tokens), we can use
+        the default _merge_multimodal_embeddings which does in-place replacement.
         """
-        logger = init_logger(__name__)
-        
-        # If no multimodal embeddings, use parent's implementation
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return super().get_input_embeddings(
-                input_ids=input_ids,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
-            )
-        
-        if is_multimodal is None:
-            raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
-        
-        # Flatten multimodal embeddings
-        from vllm.model_executor.models.utils import _flatten_embeddings
-        
-        # Debug: log inputs
-        logger.info(
-            "OpenCUA get_input_embeddings - input_ids.shape=%s, "
-            "is_multimodal.shape=%s, is_multimodal.sum()=%d, "
-            "multimodal_embeddings len=%d",
-            input_ids.shape,
-            is_multimodal.shape if is_multimodal is not None else None,
-            is_multimodal.sum().item() if is_multimodal is not None else 0,
-            len(multimodal_embeddings) if multimodal_embeddings else 0,
-        )
-        
-        if multimodal_embeddings:
-            for i, emb in enumerate(multimodal_embeddings):
-                logger.info(
-                    "OpenCUA get_input_embeddings - multimodal_embeddings[%d]: "
-                    "shape=%s",
-                    i,
-                    emb.shape if hasattr(emb, "shape") else "N/A",
-                )
-        
-        # CRITICAL: OpenCUA expands 1 placeholder to multiple visual tokens.
-        # _gather_mm_embeddings filters multimodal_embeddings to match
-        # is_multimodal.sum(), giving us only 1 token per placeholder.
-        # But we need the full visual tokens (e.g., 1344 tokens).
-        #
-        # Solution: Check if multimodal_embeddings is filtered (1 token per
-        # placeholder). If so, try to get full embeddings from cache.
-        mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
-        num_mm_tokens = mm_embeds_flat.shape[0]
-        num_placeholders = (
-            is_multimodal.sum().item() if is_multimodal is not None else 0
-        )
-        
-        # Check if filtered: 1 token per placeholder indicates filtering
-        is_filtered = num_mm_tokens == num_placeholders and num_placeholders > 0
-        
-        logger.info(
-            "OpenCUA get_input_embeddings - after flatten: "
-            "mm_embeds_flat.shape=%s, num_mm_tokens=%d, "
-            "num_placeholders=%d, is_filtered=%s",
-            mm_embeds_flat.shape,
-            num_mm_tokens,
-            num_placeholders,
-            is_filtered,
-        )
-        
-        # If filtered, try to get full embeddings from cache
-        if is_filtered and num_placeholders == 1:
-            # Look for full embeddings in cache
-            # OpenCUA typically has ~1344 visual tokens per image
-            # Find embeddings with shape[0] closest to 1344
-            full_embeddings = None
-            best_match = None
-            best_diff = float("inf")
-            expected_tokens = 1344  # Typical OpenCUA visual tokens per image
-            
-            for cached_emb in self._full_mm_embeddings_cache.values():
-                if isinstance(cached_emb, torch.Tensor):
-                    cached_len = cached_emb.shape[0]
-                    # Prefer embeddings close to expected size (1344)
-                    if cached_len > 1:
-                        diff = abs(cached_len - expected_tokens)
-                        if diff < best_diff:
-                            best_diff = diff
-                            best_match = cached_emb
-            
-            if best_match is not None:
-                full_embeddings = (best_match,)
-                logger.info(
-                    "OpenCUA get_input_embeddings - "
-                    "using cached full embeddings: shape=%s (expected ~%d)",
-                    best_match.shape,
-                    expected_tokens,
-                )
-            
-            if full_embeddings is not None:
-                # Replace filtered embeddings with full embeddings
-                multimodal_embeddings = full_embeddings
-                mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
-                num_mm_tokens = mm_embeds_flat.shape[0]
-                logger.info(
-                    "OpenCUA get_input_embeddings - "
-                    "replaced filtered embeddings: new num_mm_tokens=%d",
-                    num_mm_tokens,
-                )
-            else:
-                logger.warning(
-                    "OpenCUA get_input_embeddings - "
-                    "multimodal_embeddings filtered but no cached full "
-                    "embeddings found. Expected ~1344 tokens, got %d.",
-                    num_mm_tokens,
-                )
-        
-        # Get text embeddings (excluding placeholder tokens)
-        # Use handle_oov_mm_token=True to skip placeholder tokens
-        text_embeds = self._get_text_embeddings(
-            input_ids,
-            self.get_language_model().get_input_embeddings,
+        # Use parent's default implementation (same as Qwen2.5-VL)
+        return super().get_input_embeddings(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=True,  # Skip placeholder tokens
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-        
-        # Find placeholder positions
-        is_mm_mask = is_multimodal.bool()
-        num_text_tokens = (~is_mm_mask).sum().item()
-        num_placeholders = is_mm_mask.sum().item()
-        
-        # Build expanded embeddings: text tokens + visual tokens
-        # For each placeholder, replace with visual tokens from corresponding
-        # multimodal_embeddings element
-        result_parts = []
-        text_idx = 0
-        mm_item_idx = 0  # Index into multimodal_embeddings tuple
-        
-        for i in range(input_ids.shape[0]):
-            if is_mm_mask[i]:
-                # Placeholder: insert visual tokens from corresponding mm item
-                # Each placeholder corresponds to one element in
-                # multimodal_embeddings (one image/video)
-                if mm_item_idx < len(multimodal_embeddings):
-                    # Get visual tokens for this placeholder
-                    # multimodal_embeddings[mm_item_idx] is a tensor of shape
-                    # (num_visual_tokens, embed_dim)
-                    mm_item = multimodal_embeddings[mm_item_idx]
-                    if isinstance(mm_item, torch.Tensor):
-                        # Flatten if needed (should already be 2D)
-                        if mm_item.dim() > 2:
-                            mm_item = mm_item.flatten(0, -2)
-                        result_parts.append(mm_item)
-                    else:
-                        # Fallback: use flattened embeddings
-                        result_parts.append(mm_embeds_flat)
-                    mm_item_idx += 1
-                else:
-                    # Fallback: use flattened embeddings
-                    result_parts.append(mm_embeds_flat)
-            else:
-                # Text token: use text embedding
-                result_parts.append(text_embeds[text_idx:text_idx + 1])
-                text_idx += 1
-        
-        # Concatenate all parts
-        if result_parts:
-            result = torch.cat(result_parts, dim=0)
-        else:
-            # Fallback: use parent's implementation
-            result = super().get_input_embeddings(
-                input_ids=input_ids,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
-            )
-        
-        # Store the actual length for logging/debugging
-        # Note: forward() uses inputs_embeds.shape[0] as source of truth
-        result_len = result.shape[0]
-        self._last_embeddings_length = result_len
-        
-        logger.info(
-            "OpenCUA get_input_embeddings - expanded: "
-            "input_ids=%d -> result=%d (text=%d, placeholders=%d, "
-            "visual_tokens=%d)",
-            input_ids.shape[0],
-            result_len,
-            num_text_tokens,
-            num_placeholders,
-            num_mm_tokens,
-        )
-        
-        return result
 
     def forward(
         self,
@@ -2081,10 +1878,9 @@ class OpenCUA_VLForConditionalGeneration(
             logger.info(
                 "OpenCUA forward - positions check: "
                 "positions.shape[-1]=%d, inputs_embeds.shape[0]=%d, "
-                "_last_embeddings_length=%s, max_pos=%d",
+                "max_pos=%d",
                 current_len,
                 inputs_embeds_len,
-                self._last_embeddings_length,
                 max_pos,
             )
             
@@ -2151,7 +1947,8 @@ class OpenCUA_VLForConditionalGeneration(
                     target_len,
                 )
         
-        # Log positions for debugging: first 10, around visual tokens (22-1365), and last 10
+        # Log positions for debugging: first 10, around visual tokens
+        # (22-1365), and last 10
         pos_log = []
         if positions.shape[-1] > 0:
             pos_log.append(f"first 10: {positions[0, :10].tolist()}")
