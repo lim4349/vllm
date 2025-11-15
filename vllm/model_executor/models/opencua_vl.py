@@ -1824,6 +1824,11 @@ class OpenCUA_VLForConditionalGeneration(
                 [emb.shape for emb in multimodal_embeddings],
             )
         
+        # Cache full embeddings for HuggingFace style get_input_embeddings
+        # _gather_mm_embeddings may filter embeddings based on num_scheduled_tokens,
+        # but HuggingFace style needs full embeddings to expand the sequence
+        self._full_mm_embeddings_cache = multimodal_embeddings
+        
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1874,12 +1879,91 @@ class OpenCUA_VLForConditionalGeneration(
                 mm_shapes,
             )
         
-        image_features = _flatten_embeddings(multimodal_embeddings)
         image_token_index = self.config.media_placeholder_token_id
+        
+        # Check if embeddings were filtered by _gather_mm_embeddings
+        # HuggingFace style needs full embeddings to expand the sequence correctly
+        # Use cached full embeddings if available and filtered embeddings detected
+        if (
+            hasattr(self, "_full_mm_embeddings_cache")
+            and self._full_mm_embeddings_cache
+        ):
+            cached_shapes = [emb.shape[0] for emb in self._full_mm_embeddings_cache]
+            current_shapes = [emb.shape[0] for emb in multimodal_embeddings]
+            
+            # Check if embeddings were filtered (cached is larger)
+            if cached_shapes != current_shapes:
+                logger.info(
+                    "OpenCUA get_input_embeddings (HF style) - detected filtered "
+                    "embeddings: cached=%s, current=%s. Using cached full embeddings.",
+                    cached_shapes,
+                    current_shapes,
+                )
+                multimodal_embeddings = self._full_mm_embeddings_cache
+        
+        image_features = _flatten_embeddings(multimodal_embeddings)
         
         # Calculate feature_lengths for each image
         # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
         feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
+        
+        # If we have _visual_token_counts from get_mrope_input_positions,
+        # use it to verify/reconstruct feature_lengths
+        if hasattr(self, "_visual_token_counts") and self._visual_token_counts:
+            # Find placeholder positions in input_ids
+            placeholder_positions = []
+            if input_ids.ndim == 1:
+                placeholder_positions = torch.where(
+                    input_ids == image_token_index
+                )[0]
+            else:
+                placeholder_positions = torch.where(
+                    input_ids[0] == image_token_index
+                )[0]
+            
+            if len(placeholder_positions) > 0:
+                # Reconstruct feature_lengths from cached counts
+                reconstructed_lengths = []
+                for i, pos in enumerate(placeholder_positions):
+                    pos_item = pos.item()
+                    if pos_item in self._visual_token_counts:
+                        cached_count = self._visual_token_counts[pos_item]
+                        # If current embeddings are smaller, use cached count
+                        if (
+                            i < len(feature_lengths)
+                            and feature_lengths[i] < cached_count
+                        ):
+                            reconstructed_lengths.append(cached_count)
+                            logger.info(
+                                "OpenCUA get_input_embeddings (HF style) - "
+                                "reconstructing feature_lengths: placeholder at "
+                                "pos %d, filtered=%d, cached=%d",
+                                pos_item,
+                                feature_lengths[i],
+                                cached_count,
+                            )
+                        else:
+                            reconstructed_lengths.append(feature_lengths[i])
+                    else:
+                        # No cache, use current length
+                        if i < len(feature_lengths):
+                            reconstructed_lengths.append(feature_lengths[i])
+                
+                if reconstructed_lengths != feature_lengths:
+                    feature_lengths = reconstructed_lengths
+                    logger.info(
+                        "OpenCUA get_input_embeddings (HF style) - reconstructed "
+                        "feature_lengths: %s -> %s",
+                        [emb.shape[0] for emb in multimodal_embeddings],
+                        feature_lengths,
+                    )
+                    # Reconstruct multimodal_embeddings from cache if needed
+                    if (
+                        hasattr(self, "_full_mm_embeddings_cache")
+                        and self._full_mm_embeddings_cache
+                    ):
+                        multimodal_embeddings = self._full_mm_embeddings_cache
+                        image_features = _flatten_embeddings(multimodal_embeddings)
         
         logger.info(
             "OpenCUA get_input_embeddings (HF style) - feature_lengths=%s, "
@@ -2258,6 +2342,10 @@ class OpenCUA_VLForConditionalGeneration(
         )
 
         llm_pos_ids_list: list = []
+        
+        # Initialize _visual_token_counts cache for get_input_embeddings
+        if not hasattr(self, "_visual_token_counts"):
+            self._visual_token_counts = {}
 
         st = 0
         remain_images, remain_videos = image_nums, video_nums
