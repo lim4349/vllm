@@ -1424,11 +1424,16 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+    # For HuggingFace format, we need to wrap images and texts as dictionaries
+    # so that apply_chat_template can process them correctly
+    # This matches HuggingFace's expected input format for multimodal models
+    wrap_dicts = content_format in ("openai", "huggingface")
+    
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
         mm_tracker,
-        wrap_dicts=(content_format == "openai"),
+        wrap_dicts=wrap_dicts,
         interleave_strings=interleave_strings,
     )
 
