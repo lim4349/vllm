@@ -1416,6 +1416,9 @@ class OpenCUA_VLForConditionalGeneration(
         # Store full multimodal embeddings from get_multimodal_embeddings
         # Key: mm_hash (from encoder_cache), Value: full embeddings tensor
         self._full_mm_embeddings_cache: dict[str, torch.Tensor] = {}
+        # Store full positions from get_mrope_input_positions
+        # This allows forward() to use the correct positions for visual tokens
+        self._full_mrope_positions: torch.Tensor | None = None
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -2087,26 +2090,43 @@ class OpenCUA_VLForConditionalGeneration(
             
             if current_len < target_len:
                 # Expand positions to match the actual embeddings length
-                last_positions = positions[:, -1:]  # (3, 1)
+                # Use full positions from get_mrope_input_positions if available
                 remaining_len = target_len - current_len
                 if remaining_len > 0:
-                    start_pos = last_positions[0, 0].item() + 1
-                    new_positions_1d = torch.arange(
-                        start_pos,
-                        start_pos + remaining_len,
-                        dtype=positions.dtype,
-                        device=positions.device,
-                    )
-                    new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
-                    positions = torch.cat([positions, new_positions], dim=-1)
-                    
-                    logger.info(
-                        "OpenCUA forward - expanded positions from %d to %d "
-                        "(added %d positions to match inputs_embeds)",
-                        current_len,
-                        target_len,
-                        remaining_len,
-                    )
+                    if (
+                        self._full_mrope_positions is not None
+                        and self._full_mrope_positions.shape[-1] >= target_len
+                    ):
+                        # Use stored full positions from get_mrope_input_positions
+                        # This ensures visual tokens get correct positions (22-1365)
+                        positions = self._full_mrope_positions[:, :target_len].to(
+                            device=positions.device, dtype=positions.dtype
+                        )
+                        logger.info(
+                            "OpenCUA forward - using full mrope positions: "
+                            "expanded from %d to %d (using stored positions)",
+                            current_len,
+                            target_len,
+                        )
+                    else:
+                        # Fallback: generate sequential positions
+                        last_positions = positions[:, -1:]  # (3, 1)
+                        start_pos = last_positions[0, 0].item() + 1
+                        new_positions_1d = torch.arange(
+                            start_pos,
+                            start_pos + remaining_len,
+                            dtype=positions.dtype,
+                            device=positions.device,
+                        )
+                        new_positions = new_positions_1d.unsqueeze(0).expand(3, -1)
+                        positions = torch.cat([positions, new_positions], dim=-1)
+                        logger.info(
+                            "OpenCUA forward - expanded positions from %d to %d "
+                            "(added %d sequential positions, no stored positions)",
+                            current_len,
+                            target_len,
+                            remaining_len,
+                        )
             elif current_len > target_len:
                 # Trim positions if longer than target
                 positions = positions[:, :target_len]
@@ -2446,6 +2466,11 @@ class OpenCUA_VLForConditionalGeneration(
             context_len,
             seq_len,
         )
+
+        # Store full positions for use in forward()
+        # This allows forward() to use the correct positions for visual tokens
+        # when positions are truncated by num_scheduled_tokens
+        self._full_mrope_positions = llm_positions.clone()
 
         return llm_positions, mrope_position_delta
 
