@@ -538,11 +538,6 @@ class ModelConfig:
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
-        # OpenCUA uses 1D RoPE but still needs get_mrope_input_positions() to be called
-        # for proper position calculation with visual tokens.
-        # Keep mrope_section to ensure uses_mrope() returns True, which triggers
-        # get_mrope_input_positions(). The actual positions will be 1D sequential,
-        # not 3D MRoPE, but the interface requires mrope_section to be present.
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
