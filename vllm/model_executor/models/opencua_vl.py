@@ -1387,6 +1387,9 @@ class OpenCUA_VLForConditionalGeneration(
         raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Cache for visual token counts per placeholder position
+        # Used to reconstruct full embeddings when _gather_mm_embeddings filters them
+        self._visual_token_counts: dict[int, int] = {}
         super().__init__()
         logger = init_logger(__name__)
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
@@ -1876,7 +1879,48 @@ class OpenCUA_VLForConditionalGeneration(
         
         # Calculate feature_lengths for each image
         # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
+        # NOTE: _gather_mm_embeddings may filter embeddings based on
+        # num_scheduled_tokens, so we need to reconstruct full feature_lengths
+        # using cached _visual_token_counts from get_mrope_input_positions
         feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
+        
+        # Check if embeddings were filtered (HuggingFace style needs full embeddings)
+        # Find placeholder positions in input_ids
+        placeholder_positions = torch.where(input_ids == image_token_index)[1]
+        if len(placeholder_positions) > 0 and len(feature_lengths) > 0:
+            # If we have cached visual token counts, use them to reconstruct
+            # full feature_lengths
+            reconstructed_lengths = []
+            for i, pos in enumerate(placeholder_positions):
+                pos_item = pos.item()
+                if pos_item in self._visual_token_counts:
+                    cached_count = self._visual_token_counts[pos_item]
+                    # If filtered embeddings are smaller, use cached count
+                    if i < len(feature_lengths) and feature_lengths[i] < cached_count:
+                        reconstructed_lengths.append(cached_count)
+                        logger.info(
+                            "OpenCUA get_input_embeddings - reconstructing "
+                            "feature_lengths: placeholder at pos %d, "
+                            "filtered=%d, cached=%d",
+                            pos_item,
+                            feature_lengths[i],
+                            cached_count,
+                        )
+                    else:
+                        reconstructed_lengths.append(feature_lengths[i])
+                else:
+                    # No cache, use filtered length
+                    if i < len(feature_lengths):
+                        reconstructed_lengths.append(feature_lengths[i])
+            
+            if reconstructed_lengths != feature_lengths:
+                feature_lengths = reconstructed_lengths
+                logger.info(
+                    "OpenCUA get_input_embeddings - reconstructed "
+                    "feature_lengths: %s -> %s",
+                    [emb.shape[0] for emb in multimodal_embeddings],
+                    feature_lengths,
+                )
         
         logger.info(
             "OpenCUA get_input_embeddings - feature_lengths=%s, "
@@ -2370,6 +2414,12 @@ class OpenCUA_VLForConditionalGeneration(
             # Generate 1D sequential positions for visual tokens
             # HuggingFace implementation uses sequential position_ids, not 3D MRoPE
             num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            
+            # Cache num_visual_tokens for this placeholder position
+            # This is needed in get_input_embeddings when _gather_mm_embeddings
+            # filters multimodal_embeddings based on num_scheduled_tokens
+            # ed is the position of the placeholder token in input_tokens
+            self._visual_token_counts[ed] = num_visual_tokens
             
             # Visual tokens replace the placeholder token at position ed
             # So visual tokens start at position st_idx + text_len
