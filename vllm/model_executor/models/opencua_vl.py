@@ -1328,17 +1328,10 @@ class OpenCUA_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         }
 
         def get_replacement_opencua(item_idx: int, modality: str):
-            # Qwen2.5-VL style: Expand 1 placeholder to multiple placeholder tokens
-            # This matches the number of visual tokens that will replace them
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-            
-            # Calculate number of visual tokens after spatial merging
-            merge_length = image_processor.merge_size**2
-            num_tokens = int(grid_thw.prod()) // merge_length
-            
-            return [placeholder[modality]] * num_tokens
+            # HuggingFace OpenCUA style: Keep 1 placeholder token
+            # The expansion will be done in get_input_embeddings using
+            # _merge_input_ids_with_image_features logic
+            return [placeholder[modality]]
 
         return [
             PromptReplacement(
@@ -1825,129 +1818,126 @@ class OpenCUA_VLForConditionalGeneration(
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """
-        Qwen2.5-VL style: Use default implementation.
+        HuggingFace OpenCUA style: Implement _merge_input_ids_with_image_features logic.
         
-        Since _get_prompt_updates already expands 1 placeholder to multiple
-        placeholder tokens (matching the number of visual tokens), we can use
-        the default _merge_multimodal_embeddings which does in-place replacement.
+        Unlike Qwen2.5-VL, OpenCUA keeps 1 placeholder token and expands it during
+        embedding merge using cumsum-based position calculation.
         """
         logger = init_logger(__name__)
         
-        # Debug logging to verify embeddings matching
-        if (
-            multimodal_embeddings is not None
-            and len(multimodal_embeddings) > 0
-            and is_multimodal is not None
-        ):
-            from vllm.model_executor.models.utils import _flatten_embeddings
-            mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
-            num_mm_tokens = mm_embeds_flat.shape[0]
-            num_placeholders = is_multimodal.sum().item()
-            
-            # Find where is_multimodal is True
-            is_mm_indices = torch.where(is_multimodal)[0]
-            first_mm_idx = is_mm_indices[0].item() if len(is_mm_indices) > 0 else None
-            last_mm_idx = is_mm_indices[-1].item() if len(is_mm_indices) > 0 else None
-            
-            logger.info(
-                "OpenCUA get_input_embeddings - input_ids.shape=%s, "
-                "is_multimodal.sum()=%d, multimodal_embeddings tokens=%d, "
-                "match=%s, is_multimodal True at indices [%s:%s] "
-                "(should be [22:1366] for visual tokens)",
-                input_ids.shape,
-                num_placeholders,
-                num_mm_tokens,
-                num_placeholders == num_mm_tokens,
-                first_mm_idx,
-                last_mm_idx + 1 if last_mm_idx is not None else None,
-            )
-            
-            if num_placeholders != num_mm_tokens:
-                logger.warning(
-                    "OpenCUA get_input_embeddings - MISMATCH: "
-                    "is_multimodal.sum()=%d != multimodal_embeddings tokens=%d. "
-                    "This will cause incorrect embedding placement!",
-                    num_placeholders,
-                    num_mm_tokens,
-                )
-            
-            # Verify is_multimodal positions match expected visual token positions
-            if first_mm_idx != 22 or (last_mm_idx is not None and last_mm_idx != 1365):
-                logger.warning(
-                    "OpenCUA get_input_embeddings - POSITION MISMATCH: "
-                    "is_multimodal True at [%s:%s], but expected [22:1366] "
-                    "for visual tokens. This will cause incorrect embedding placement!",
-                    first_mm_idx,
-                    last_mm_idx + 1 if last_mm_idx is not None else None,
-                )
-        
-        # Use parent's default implementation (same as Qwen2.5-VL)
-        result = super().get_input_embeddings(
-            input_ids=input_ids,
-            multimodal_embeddings=multimodal_embeddings,
+        # Get text embeddings first
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.get_language_model().get_input_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
         
-        # Verify visual embeddings are correctly placed
-        if (
-            multimodal_embeddings is not None
-            and len(multimodal_embeddings) > 0
-            and is_multimodal is not None
-        ):
-            from vllm.model_executor.models.utils import _flatten_embeddings
-            mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
-            
-            # Check if visual embeddings match at expected positions
-            is_mm_indices = torch.where(is_multimodal)[0]
-            if len(is_mm_indices) > 0:
-                first_mm_idx = is_mm_indices[0].item()
-                last_mm_idx = is_mm_indices[-1].item()
-                
-                # Compare first and last visual embeddings
-                mm_first = mm_embeds_flat[0:1]
-                mm_last = mm_embeds_flat[-1:]
-                result_at_first = result[first_mm_idx:first_mm_idx + 1]
-                result_at_last = result[last_mm_idx:last_mm_idx + 1]
-                
-                # Check if they match (allowing for small numerical differences)
-                diff_first = (mm_first - result_at_first).abs().max().item()
-                diff_last = (mm_last - result_at_last).abs().max().item()
-                match_threshold = 1e-3
-                
-                # Log statistics about visual embeddings
-                mm_mean = mm_embeds_flat.mean().item()
-                mm_std = mm_embeds_flat.std().item()
-                mm_min = mm_embeds_flat.min().item()
-                mm_max = mm_embeds_flat.max().item()
-                
-                logger.info(
-                    "OpenCUA get_input_embeddings - visual embedding verification: "
-                    "first_mm_idx=%d, last_mm_idx=%d, "
-                    "diff_first=%.6f, diff_last=%.6f, match=%s, "
-                    "mm_stats: mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
-                    first_mm_idx,
-                    last_mm_idx,
-                    diff_first,
-                    diff_last,
-                    diff_first < match_threshold and diff_last < match_threshold,
-                    mm_mean,
-                    mm_std,
-                    mm_min,
-                    mm_max,
-                )
-                
-                if diff_first >= match_threshold or diff_last >= match_threshold:
-                    logger.warning(
-                        "OpenCUA get_input_embeddings - visual embeddings mismatch: "
-                        "multimodal_embeddings does not match result at positions. "
-                        "diff_first=%.6f, diff_last=%.6f. "
-                        "Visual embeddings may not be correctly placed!",
-                        diff_first,
-                        diff_last,
-                    )
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
         
-        return result
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229."
+            )
+        
+        # HuggingFace OpenCUA style: _merge_input_ids_with_image_features
+        from vllm.model_executor.models.utils import _flatten_embeddings
+        
+        image_features = _flatten_embeddings(multimodal_embeddings)
+        image_token_index = self.config.media_placeholder_token_id
+        
+        # Calculate feature_lengths for each image
+        # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
+        feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
+        
+        batch_size, sequence_length = input_ids.shape
+        _, embed_dim = image_features.shape
+        
+        # 1. Create _token_occupation_table
+        # Each placeholder token occupies feature_lengths[i] positions
+        _token_occupation_table = torch.ones_like(input_ids)
+        placeholder_indices = torch.where(input_ids == image_token_index)
+        
+        if len(placeholder_indices[0]) > 0:
+            # Map placeholder positions to feature_lengths
+            # In vLLM, placeholders are processed in order
+            placeholder_count = 0
+            for batch_idx in range(batch_size):
+                batch_placeholders = torch.where(
+                    input_ids[batch_idx] == image_token_index
+                )[0]
+                for pos_idx in batch_placeholders:
+                    if placeholder_count < len(feature_lengths):
+                        _token_occupation_table[
+                            batch_idx, pos_idx
+                        ] = feature_lengths[placeholder_count]
+                        placeholder_count += 1
+        
+        max_embed_dim = _token_occupation_table.sum(-1).max().item()
+        
+        # 2. Compute new positions for text tokens
+        new_token_positions = torch.cumsum(_token_occupation_table, -1) - 1
+        batch_indices, non_image_indices = torch.where(
+            input_ids != image_token_index
+        )
+        text_to_overwrite = new_token_positions[
+            batch_indices, non_image_indices
+        ]
+        
+        # 3. Create final embedding tensor
+        final_embedding = torch.zeros(
+            batch_size, max_embed_dim, embed_dim,
+            dtype=inputs_embeds.dtype, device=inputs_embeds.device
+        )
+        
+        # 4. Fill text embeddings at new positions
+        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
+            batch_indices, non_image_indices
+        ]
+        
+        # 5. Fill image embeddings at remaining positions
+        image_to_overwrite = torch.full(
+            (batch_size, max_embed_dim),
+            True,
+            dtype=torch.bool,
+            device=inputs_embeds.device,
+        )
+        image_to_overwrite[batch_indices, text_to_overwrite] = False
+        
+        # Ensure we have the right number of image positions
+        num_image_positions = image_to_overwrite.sum()
+        if num_image_positions != image_features.shape[0]:
+            raise ValueError(
+                f"Image positions mismatch: {num_image_positions} != "
+                f"{image_features.shape[0]}"
+            )
+        
+        final_embedding[image_to_overwrite] = image_features.contiguous().to(
+            inputs_embeds.device
+        )
+        
+        # vLLM expects 2D tensor (seq_len, embed_dim), not 3D
+        # (batch, seq_len, embed_dim). Since vLLM processes one sequence at a
+        # time, we take the first batch
+        final_embedding_2d = final_embedding[0]  # (max_embed_dim, embed_dim)
+        
+        logger.info(
+            "OpenCUA get_input_embeddings - HuggingFace style merge: "
+            "input_ids.shape=%s, inputs_embeds.shape=%s, "
+            "final_embedding.shape=%s, final_embedding_2d.shape=%s, "
+            "image_features.shape=%s, feature_lengths=%s",
+            input_ids.shape,
+            inputs_embeds.shape,
+            final_embedding.shape,
+            final_embedding_2d.shape,
+            image_features.shape,
+            feature_lengths,
+        )
+        
+        return final_embedding_2d
 
     def forward(
         self,
@@ -2366,10 +2356,9 @@ class OpenCUA_VLForConditionalGeneration(
             )
 
             llm_pos_ids_list.append(visual_positions)
-            # Qwen2.5-VL style: _get_prompt_updates already expanded 1 placeholder
-            # to num_visual_tokens placeholders in input_tokens.
-            # So we need to skip all num_visual_tokens placeholders to find the next
-            # text segment.
+            # HuggingFace OpenCUA style: _get_prompt_updates keeps 1 placeholder token
+            # The expansion is done in get_input_embeddings using cumsum logic.
+            # So we only need to skip 1 placeholder token to find the next text segment.
             # The st_idx for positions is automatically updated by
             # llm_pos_ids_list[-1].max() + 1 in the next iteration.
             
@@ -2380,13 +2369,12 @@ class OpenCUA_VLForConditionalGeneration(
                 ed,
                 num_visual_tokens,
                 st,
-                ed + num_visual_tokens,
+                ed + 1,
                 visual_positions.max().item() + 1,
             )
             
-            # In input_tokens, skip all expanded placeholder tokens (num_visual_tokens)
-            # to find the next text segment
-            st = ed + num_visual_tokens
+            # In input_tokens, skip the single placeholder token to find next segment
+            st = ed + 1
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
