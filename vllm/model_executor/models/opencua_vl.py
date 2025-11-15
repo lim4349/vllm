@@ -1834,7 +1834,11 @@ class OpenCUA_VLForConditionalGeneration(
         logger = init_logger(__name__)
         
         # Debug logging to verify embeddings matching
-        if multimodal_embeddings is not None and is_multimodal is not None:
+        if (
+            multimodal_embeddings is not None
+            and len(multimodal_embeddings) > 0
+            and is_multimodal is not None
+        ):
             from vllm.model_executor.models.utils import _flatten_embeddings
             mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
             num_mm_tokens = mm_embeds_flat.shape[0]
