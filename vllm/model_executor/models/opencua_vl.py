@@ -202,6 +202,9 @@ class OpenCUA_VLMultiModalProcessor(
         merge_size = hf_config.spatial_merge_size
 
         def get_replacement(item_idx: int, modality: str):
+            # Check if modality exists in out_mm_kwargs
+            if modality not in out_mm_kwargs:
+                return []
             out_item = out_mm_kwargs[modality][item_idx]
             grid_key = f"{modality}_grid_thw"
             grid_thw = out_item[grid_key].data
@@ -212,24 +215,18 @@ class OpenCUA_VLMultiModalProcessor(
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * num_tokens
 
-        updates = []
-        if "image" in out_mm_kwargs:
-            updates.append(
-                PromptReplacement(
-                    modality="image",
-                    target=[image_token_id],
-                    replacement=lambda idx: get_replacement(idx, "image"),
-                )
+        # Always return updates for both image and video modalities
+        # to match expected behavior in _merge_mm_kwargs
+        from functools import partial
+
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[image_token_id if modality == "image" else video_token_id],
+                replacement=partial(get_replacement, modality=modality),
             )
-        if "video" in out_mm_kwargs:
-            updates.append(
-                PromptReplacement(
-                    modality="video",
-                    target=[video_token_id],
-                    replacement=lambda idx: get_replacement(idx, "video"),
-                )
-            )
-        return updates
+            for modality in ("image", "video")
+        ]
 
 
 @MULTIMODAL_REGISTRY.register_processor(
