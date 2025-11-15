@@ -1888,7 +1888,6 @@ class OpenCUA_VLForConditionalGeneration(
             current_len = positions.shape[-1]
             inputs_embeds_len = inputs_embeds.shape[0]
             # Use inputs_embeds.shape[0] as the source of truth
-            # _last_embeddings_length is only used for logging/debugging
             target_len = inputs_embeds_len
             max_pos = positions[0, -1].item()
             
@@ -1901,7 +1900,25 @@ class OpenCUA_VLForConditionalGeneration(
                 max_pos,
             )
             
-            if current_len < target_len:
+            # Always prefer _full_mrope_positions if available and matches target_len
+            # This ensures visual tokens get correct positions even when
+            # current_len == target_len but positions values are wrong
+            if (
+                self._full_mrope_positions is not None
+                and self._full_mrope_positions.shape[-1] >= target_len
+            ):
+                # Use stored full positions from get_mrope_input_positions
+                # This ensures visual tokens get correct positions
+                positions = self._full_mrope_positions[:, :target_len].to(
+                    device=positions.device, dtype=positions.dtype
+                )
+                logger.info(
+                    "OpenCUA forward - using full mrope positions: "
+                    "replaced positions (len %d -> %d, using stored positions)",
+                    current_len,
+                    target_len,
+                )
+            elif current_len < target_len:
                 # Expand positions to match the actual embeddings length
                 # Use full positions from get_mrope_input_positions if available
                 remaining_len = target_len - current_len
@@ -1911,30 +1928,14 @@ class OpenCUA_VLForConditionalGeneration(
                         and self._full_mrope_positions.shape[-1] >= target_len
                     ):
                         # Use stored full positions from get_mrope_input_positions
-                        # This ensures visual tokens get correct positions (22-1365)
                         positions = self._full_mrope_positions[:, :target_len].to(
                             device=positions.device, dtype=positions.dtype
                         )
-                        # Log positions to verify visual tokens get correct positions
-                        visual_start_pos = (
-                            positions[0, 22].item()
-                            if positions.shape[-1] > 22
-                            else None
-                        )
-                        visual_end_pos = (
-                            positions[0, 1365].item()
-                            if positions.shape[-1] > 1365
-                            else None
-                        )
                         logger.info(
                             "OpenCUA forward - using full mrope positions: "
-                            "expanded from %d to %d (using stored positions), "
-                            "visual_start_pos=%s (should be 22), "
-                            "visual_end_pos=%s (should be 1365)",
+                            "expanded from %d to %d (using stored positions)",
                             current_len,
                             target_len,
-                            visual_start_pos,
-                            visual_end_pos,
                         )
                     else:
                         # Fallback: generate sequential positions
