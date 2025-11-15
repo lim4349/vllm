@@ -1807,6 +1807,18 @@ class OpenCUA_VLForConditionalGeneration(
                 video_embeddings = self._process_video_input(multimodal_input)
                 multimodal_embeddings += video_embeddings
         
+        # Logging to verify embeddings are not filtered
+        logger = init_logger(__name__)
+        if multimodal_embeddings:
+            total_tokens = sum(emb.shape[0] for emb in multimodal_embeddings)
+            logger.info(
+                "OpenCUA get_multimodal_embeddings - returned %d embeddings, "
+                "total tokens: %d, shapes: %s",
+                len(multimodal_embeddings),
+                total_tokens,
+                [emb.shape for emb in multimodal_embeddings],
+            )
+        
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1846,12 +1858,32 @@ class OpenCUA_VLForConditionalGeneration(
         # HuggingFace OpenCUA style: _merge_input_ids_with_image_features
         from vllm.model_executor.models.utils import _flatten_embeddings
         
+        # Log multimodal_embeddings before processing
+        mm_shapes = (
+            [emb.shape for emb in multimodal_embeddings]
+            if multimodal_embeddings
+            else []
+        )
+        logger.info(
+            "OpenCUA get_input_embeddings - multimodal_embeddings: "
+            "len=%d, shapes=%s",
+            len(multimodal_embeddings),
+            mm_shapes,
+        )
+        
         image_features = _flatten_embeddings(multimodal_embeddings)
         image_token_index = self.config.media_placeholder_token_id
         
         # Calculate feature_lengths for each image
         # In vLLM, multimodal_embeddings is a tuple of tensors, one per image
         feature_lengths = [emb.shape[0] for emb in multimodal_embeddings]
+        
+        logger.info(
+            "OpenCUA get_input_embeddings - feature_lengths=%s, "
+            "image_features.shape=%s",
+            feature_lengths,
+            image_features.shape,
+        )
         
         # vLLM may pass 1D input_ids (seq_len,) or 2D (batch_size, seq_len)
         if input_ids.ndim == 1:
