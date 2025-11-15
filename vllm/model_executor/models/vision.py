@@ -10,7 +10,8 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -82,8 +83,8 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
-    attn_backend_override: _Backend | None = None,
-) -> _Backend:
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> AttentionBackendEnum:
     """
     Get the available attention backend for Vision Transformer.
     """
@@ -93,11 +94,16 @@ def get_vit_attn_backend(
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
 
-    selected_backend: _Backend | None = get_env_variable_attn_backend()
+    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
     if selected_backend is not None:
         return selected_backend
 
     return current_platform.get_vit_attn_backend(head_size, dtype)
+
+
+def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
@@ -324,7 +330,7 @@ def run_dp_sharded_mrope_vision_model(
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
     *,
-    rope_type: Literal["rope_3d", "rope_2d", "rope_1d"],
+    rope_type: Literal["rope_3d", "rope_2d"],
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -339,7 +345,6 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
-                   "rope_1d" for 1D rope (e.g., OpenCUA-VL)
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -354,39 +359,6 @@ def run_dp_sharded_mrope_vision_model(
 
     """
     tp_size = get_tensor_model_parallel_world_size()
-
-    # Optimization: if tp_size == 1, skip data parallel processing
-    # to save memory and avoid unnecessary overhead
-    if tp_size == 1:
-        # Directly call vision model without sharding
-        if rope_type == "rope_2d":
-            image_embeds = vision_model(pixel_values, torch.tensor(grid_thw_list))
-            if isinstance(image_embeds, list):
-                image_embeds = torch.cat(image_embeds, dim=0)
-        else:
-            image_embeds = vision_model(pixel_values, grid_thw_list)
-
-        # Split embeddings for each image
-        if rope_type == "rope_2d":
-            embed_dim_reduction_factor = (
-                vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
-            )
-        else:
-            embed_dim_reduction_factor = (
-                vision_model.spatial_merge_size * vision_model.spatial_merge_size
-            )
-        patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
-        sizes = [
-            (patch_size // embed_dim_reduction_factor)
-            for patch_size in patches_per_image
-        ]
-        # For 2D rope, embeddings are 3D (seq_len, merge_size, hidden_dim)
-        # Need to reshape before splitting
-        if rope_type == "rope_2d" and image_embeds.ndim == 3:
-            hidden_dim = image_embeds.shape[2]
-            # Reshape to (total_patches, hidden_dim) for splitting
-            image_embeds = image_embeds.reshape(-1, hidden_dim)
-        return tuple(image_embeds.split(sizes) if len(sizes) > 1 else (image_embeds,))
 
     # GPU_0 tp_rank_local = 0
     # GPU_1 tp_rank_local = 1
@@ -578,19 +550,3 @@ def get_llm_pos_ids_for_vision(
     llm_pos_ids_list.append(_llm_pos_ids + start_idx)
     llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
     return llm_pos_ids
-
-
-# Due to a performance regression with Conv3D in PyTorch2.9, we reshape
-# Conv3D weights to Linear weights for better performance.
-# See: https://github.com/vllm-project/vllm/issues/27406
-# and https://github.com/pytorch/pytorch/issues/166122
-# FIXME(Isotr0py): Revert the PR introduces this workaround
-# (https://github.com/vllm-project/vllm/pull/27418),
-# once the performance issue is resolved in PyTorch.
-def conv3d_to_linear_weight(conv3d_weight: torch.Tensor) -> torch.Tensor:
-    """
-    Reshape Conv3D weight to Linear weight. Only work when kernel_size==stride.
-    """
-    out_channels, in_channels, kt, kh, kw = conv3d_weight.shape
-    linear_weight = conv3d_weight.reshape(out_channels, in_channels * kt * kh * kw)
-    return linear_weight
