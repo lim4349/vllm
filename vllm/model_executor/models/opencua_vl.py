@@ -156,39 +156,29 @@ class OpenCUA_VLDummyInputsBuilder(BaseDummyInputsBuilder[OpenCUA_VLProcessingIn
         return result
 
 
-class OpenCUA_VLMultiModalProcessor(
-    BaseMultiModalProcessor[OpenCUA_VLProcessingInfo]
-):
+class OpenCUA_VLMultiModalProcessor(BaseMultiModalProcessor[OpenCUA_VLProcessingInfo]):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        # Always return config for both image and video modalities
+        # to match Qwen2.5-VL behavior and _get_prompt_updates
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        image_grid_sizes = (
-            image_grid_thw.prod(-1)
-            if image_grid_thw.numel() > 0
-            else torch.empty(0)
-        )
-        video_grid_sizes = (
-            video_grid_thw.prod(-1)
-            if video_grid_thw.numel() > 0
-            else torch.empty(0)
-        )
+        image_grid_sizes = image_grid_thw.prod(-1)
+        video_grid_sizes = video_grid_thw.prod(-1)
 
-        config = {}
-        if image_grid_thw.numel() > 0:
-            config["pixel_values"] = MultiModalFieldConfig.flat_from_sizes(
+        return dict(
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
-            )
-            config["image_grid_thw"] = MultiModalFieldConfig.batched("image")
-        if video_grid_thw.numel() > 0:
-            config["pixel_values_videos"] = MultiModalFieldConfig.flat_from_sizes(
+            ),
+            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
-            )
-            config["video_grid_thw"] = MultiModalFieldConfig.batched("video")
-        return config
+            ),
+            video_grid_thw=MultiModalFieldConfig.batched("video"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -202,9 +192,8 @@ class OpenCUA_VLMultiModalProcessor(
         merge_size = hf_config.spatial_merge_size
 
         def get_replacement(item_idx: int, modality: str):
-            # Check if modality exists in out_mm_kwargs
-            if modality not in out_mm_kwargs:
-                return []
+            # Qwen2.5-VL style: directly access out_mm_kwargs[modality][item_idx]
+            # This assumes the modality exists in out_mm_kwargs when called
             out_item = out_mm_kwargs[modality][item_idx]
             grid_key = f"{modality}_grid_thw"
             grid_thw = out_item[grid_key].data
@@ -493,4 +482,3 @@ class OpenCUA_VLForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
-
